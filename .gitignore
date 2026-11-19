@@ -33,6 +33,7 @@ compile_commands.json
 .coverage
 htmlcov/
 .claude/
+.omc/
 .scratch*/
 
 # Generated runtime artifacts
