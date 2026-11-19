@@ -169,7 +169,10 @@ Launch anything longer than ~2 minutes detached (`setsid nohup … > log 2>&1 &`
 
 **Style.** ruff, line length 120, isort settings in `pyproject.toml`. Upstream files carry an SPDX
 header. Upstream contributions need DCO sign-off (`git commit -s`, `CONTRIBUTING.md`). `.claude/`
-is gitignored here, so the agents and skills below are local unless force-added.
+is gitignored here, so new agents and skills need `git add -f`.
+
+**Commits.** Do not add a Claude `Co-Authored-By` trailer (or any other Claude attribution) to commit
+messages or PR descriptions.
 
 ## Project agents & skills
 
