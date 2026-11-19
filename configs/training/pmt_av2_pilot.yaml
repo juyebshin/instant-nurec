@@ -1,0 +1,85 @@
+# Joint fine-tune of the released pa-multiview model on AV2 (PseudoMapTrainer index), PILOT.
+# Target contract: T=8 context frames x 7 ring cameras at 504x280.
+# Train = 491 AV2 train logs with MoGe depth; val = 101 AV2 val logs (test logs held out).
+# Supervision = 1 random 20 Hz frame per camera + the 8 context keyframes, so the render
+# `distance` loss sees MoGe depth (only 2 Hz keyframes have it).
+seed: 38
+out_dir: /home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/runs
+phase: render
+reference_profile: full-model-front-v1
+
+logger:
+  name: csv
+  run_name: pmt-av2-pilot
+
+dataset:
+  train: &train_pmt
+    index_paths:
+      - /home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/av2/train
+    camera_ids: [ring_front_center, ring_front_right, ring_front_left, ring_rear_right, ring_rear_left,
+                 ring_side_right, ring_side_left]
+    camera_subsampler: {frame_width: 504, frame_height: 280}
+    n_frames_per_sample: 8
+    n_samples_per_sequence: 10
+    frame_gap_us: 500000
+    supervision_frame_batch:
+      n_frames_per_camera: 1
+      prepend_timestamps_us: 100000
+      append_timestamps_us: 100000
+      sample_strategy: random
+      camera_subsampler: {frame_width: 252, frame_height: 140}  # half res: 504x280 OOMs in ~36 GB (GPU shared)
+      include_context_frames: true
+  val:
+    <<: *train_pmt
+    index_paths:
+      - /home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/av2/val
+    n_samples_per_sequence: 1
+
+model:
+  freeze_encoder: false
+  init_weights_paths:
+    full: /home1/irteam/workspace/instant-nurec/checkpoints/pth/instant_nurec_pa_multiview_1.1.0.pth
+  init_full_keep_heads: true
+  post_processing:
+    enabled: true
+    optimization_start_global_step: 1000
+  decoder:
+    name: dpt-decoder
+    n_semantic_classes: 8
+
+system:
+  max_epochs: 2                  # 491 logs x 10 samples = 4910 steps / epoch at batch 1 (~11 s/step on shared GPU 2)
+  train_batch_size: 1
+  val_batch_size: 1
+  train_num_workers: 16          # a sample decodes ~119 full-res JPEGs + seg + depth PNGs (~20 s on 1 core)
+  val_num_workers: 4
+  precision: bf16-mixed
+  accelerator: gpu
+  devices: 1
+  num_nodes: 1
+  strategy: auto
+  enable_render_global_step: 0
+  limit_val_batches: 50
+  log_every_n_steps: 10
+  save_every_n_train_steps: 1000
+  checkpoint_monitor: val/psnr
+  checkpoint_mode: max
+  save_top_k: 2
+  optimizer:
+    lr: 2.0e-5                   # 1/5 of the upstream render-phase lr: the encoder is unfrozen
+  scheduler:
+    warmup_steps: 500
+
+# Same starting weights as the smoke run, not tuned.
+loss:
+  primitive_sky_cubemap: 0.01
+  primitive_rgb: 0.1
+  primitive_distance: 1.0
+  primitive_distance_gradient: 1.0
+  primitive_semantics: 0.1
+  primitive_normal: 0.2
+  primitive_velocity: 1.0
+  rgb: 1.0
+  lpips: 0.2
+  distance: 0.1
+  background: 2.0

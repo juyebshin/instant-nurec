@@ -261,7 +261,7 @@ class KelvinDPTDecoder(nn.Module):
         )
 
         # Context-training heads (RGB, world-normal, semantic-Logits).
-        self.n_semantic_classes = len(KelvinSemanticClass)
+        self.n_semantic_classes = config.n_semantic_classes
         self.context_head = DPTFullHead(
             input_dim=embed_dim,
             reassemble_hidden_dims=tuple(config.dpt_reassemble_hidden_dims),

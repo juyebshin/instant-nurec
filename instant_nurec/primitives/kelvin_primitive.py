@@ -40,13 +40,21 @@ logger = logging.getLogger(__name__)
 
 
 class KelvinSemanticClass(IntEnum):
-    """Per-Gaussian semantic class IDs for Kelvin primitives. Channel index equals enum value."""
+    """Per-Gaussian semantic class IDs for Kelvin primitives. Channel index equals enum value.
+
+    The released checkpoints predict the first five. LANE / CROSSWALK / BOUNDARY are
+    the road-map classes of the 8-class head (``KelvinDPTDecoderConfig.n_semantic_classes
+    = 8``); with them, ROAD means road surface without lane or crosswalk paint.
+    """
 
     OTHERS = 0
     EGO = 1
     SKY = 2
     ROAD = 3
     MOVABLE = 4
+    LANE = 5
+    CROSSWALK = 6
+    BOUNDARY = 7
 
     @classmethod
     def opacity_mask_from_semantic_probs(cls, semantic_probs: torch.Tensor) -> torch.Tensor:

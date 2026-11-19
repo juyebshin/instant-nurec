@@ -218,7 +218,30 @@ class NCoreMixtureDatasetConfig(BaseConfigSchema):
     mixture: dict[str, NCoreMixtureComponentConfig] = Field(min_length=1)
 
 
-NCoreTrainDatasetConfig = NCoreInstantNuRecDatasetConfig | NCoreMixtureDatasetConfig
+class PMTIndexDatasetConfig(BaseConfigSchema):
+    """Non-NCore logs (AV2 / nuScenes) from per-log index pickles written by
+    PseudoMapTrainer ``RoGS/scripts/inurec_finetune_index.py``.
+
+    Context: ``n_frames_per_sample`` frames of every camera, ``frame_gap_us`` apart on the
+    first camera's timeline, other cameras at their nearest frame. Supervision: as
+    ``SupervisionFrameBatchConfig`` (independent frames per camera inside the context span).
+    """
+
+    index_paths: list[str] = Field(min_length=1, description="Per-log index pickles, or directories of them")
+    camera_ids: list[str] = Field(min_length=1, description="Context = supervision cameras; first is the reference")
+    camera_subsampler: CameraSubsamplerConfig = Field(default_factory=CameraSubsamplerConfig)
+    n_frames_per_sample: int = Field(default=8, ge=1)
+    n_samples_per_sequence: int = Field(default=10, ge=1)
+    frame_gap_us: int = Field(default=500000, gt=0)
+    context_requires_depth: bool = Field(
+        default=True, description="Draw context frames only from frames that have a depth label"
+    )
+    depth: bool = True
+    semantic_segmentation: bool = True
+    supervision_frame_batch: SupervisionFrameBatchConfig = Field(default_factory=SupervisionFrameBatchConfig)
+
+
+NCoreTrainDatasetConfig = PMTIndexDatasetConfig | NCoreInstantNuRecDatasetConfig | NCoreMixtureDatasetConfig
 
 
 

@@ -19,6 +19,7 @@ from instant_nurec.config_schema.train import TrainingConfig
 from instant_nurec.datasets.tracks import CuboidTracks, TrackFlags
 from instant_nurec.model.kelvin import KelvinInstantNuRec
 from instant_nurec.model.blocks.dav3 import convert_dav3_state_dict
+from instant_nurec.primitives.kelvin_primitive import KelvinSemanticClass
 from instant_nurec.training.losses import LossReturn, TrainingLosses
 from instant_nurec.training.optim import CosineWithWarmupPBScheduler, make_optimizer
 from instant_nurec.training.renderer import render_supervision
@@ -141,6 +142,34 @@ class TrainingSystem(LightningModule):
         self.model.decoder.load_state_dict(current_decoder_state, strict=True)
         logger.info("Initialized encoder and depth head from DAv3 checkpoint %s.", path)
 
+    _SEMANTIC_OUT = "decoder.context_head.fusion_head.after_conv.2"
+    # New class -> released class whose logit row it starts from: road paint starts as
+    # ROAD, curbs / sidewalks / terrain start as OTHERS (where the 5-class head put them).
+    _SEMANTIC_WIDEN_FROM = {
+        KelvinSemanticClass.LANE: KelvinSemanticClass.ROAD,
+        KelvinSemanticClass.CROSSWALK: KelvinSemanticClass.ROAD,
+        KelvinSemanticClass.BOUNDARY: KelvinSemanticClass.OTHERS,
+    }
+    _SEMANTIC_WIDEN_BIAS = -2.0  # new rows start below their source: step-0 argmax is unchanged
+
+    def _widen_semantic_head(self, state_dict: dict[str, torch.Tensor]) -> None:
+        """Widen a released 5-class context head (3 RGB + 3 normal + 5 logits) in place."""
+        n_new = self.model.decoder.n_semantic_classes
+        weight, bias = state_dict[f"{self._SEMANTIC_OUT}.weight"], state_dict[f"{self._SEMANTIC_OUT}.bias"]
+        n_old = weight.shape[0] - 6
+        if n_old == n_new:
+            return
+        if (n_old, n_new) != (5, 8):
+            raise ValueError(f"Cannot widen a {n_old}-class semantic head to {n_new} classes")
+        rows_w, rows_b = [weight], [bias]
+        for new in (KelvinSemanticClass.LANE, KelvinSemanticClass.CROSSWALK, KelvinSemanticClass.BOUNDARY):
+            src = 6 + int(self._SEMANTIC_WIDEN_FROM[new])
+            rows_w.append(weight[src : src + 1])
+            rows_b.append(bias[src : src + 1] + self._SEMANTIC_WIDEN_BIAS)
+        state_dict[f"{self._SEMANTIC_OUT}.weight"] = torch.cat(rows_w)
+        state_dict[f"{self._SEMANTIC_OUT}.bias"] = torch.cat(rows_b)
+        logger.info("Widened the semantic head from %d to %d classes.", n_old, n_new)
+
     def initialize_weights(self) -> None:
         paths = self.config.model.init_weights_paths
         if not paths:
@@ -152,11 +181,15 @@ class TrainingSystem(LightningModule):
         full_key = next((key for key in ("full", "tokengs") if key in paths), None)
         if full_key is not None:
             state_dict = self._read_full_state_dict(Path(paths[full_key]))
-            # The reference recipe reinitializes the dense Gaussian head for full-model
-            # and current-format TokenGS initialization, in either phase.
-            state_dict = {
-                key: value for key, value in state_dict.items() if not key.startswith("decoder.gaussians_head.")
-            }
+            keep_heads = self.config.model.init_full_keep_heads
+            if keep_heads:
+                self._widen_semantic_head(state_dict)
+            else:
+                # The reference recipe reinitializes the dense Gaussian head for full-model
+                # and current-format TokenGS initialization, in either phase.
+                state_dict = {
+                    key: value for key, value in state_dict.items() if not key.startswith("decoder.gaussians_head.")
+                }
             incompatible = self.model.load_state_dict(state_dict, strict=False)
             logger.info(
                 "Initialized full model from %s (%d missing, %d unexpected keys).",
@@ -164,6 +197,11 @@ class TrainingSystem(LightningModule):
                 len(incompatible.missing_keys),
                 len(incompatible.unexpected_keys),
             )
+            if keep_heads:
+                logger.info("Missing keys: %s", sorted(incompatible.missing_keys))
+                logger.info("Unexpected keys: %s", sorted(incompatible.unexpected_keys))
+                self._weights_initialized = True
+                return
         else:
             unsupported = set(paths) - {"dav3"}
             if unsupported:

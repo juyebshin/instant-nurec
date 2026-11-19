@@ -258,12 +258,15 @@ class CameraFrameLabels:
     metric_distance: torch.Tensor | None = None
     normals: torch.Tensor | None = None
     flags: torch.Tensor | None = None
+    # Optional per-pixel semantic class id (KelvinSemanticClass order, 255 = ignore). When
+    # present it is the semantic-loss target instead of the class implied by ``flags``.
+    semantic_class: torch.Tensor | None = None
 
     def __post_init__(self):
         if self.rgb is not None:
             assert self.rgb.ndim == 4 and self.rgb.shape[3] == 3, "RGB must be a 4D tensor (B, height, width, 3)"
             assert self.rgb.dtype == torch.float32, "RGB must be a float32 tensor"
-        for name, channels in (("metric_distance", 1), ("normals", 3), ("flags", 1)):
+        for name, channels in (("metric_distance", 1), ("normals", 3), ("flags", 1), ("semantic_class", 1)):
             value = getattr(self, name)
             if value is not None:
                 assert value.ndim == 4 and value.shape[-1] == channels, (
@@ -317,6 +320,7 @@ class CameraFrameLabels:
             metric_distance=collate_fn(metric_distance_seq, device),
             normals=collate_fn([item.normals for item in seq], device),
             flags=collate_fn([item.flags for item in seq], device),
+            semantic_class=collate_fn([item.semantic_class for item in seq], device),
         )
 
     def to(self, *args, **kwargs) -> Self:
@@ -325,6 +329,7 @@ class CameraFrameLabels:
             metric_distance=self.metric_distance.to(*args, **kwargs) if self.metric_distance is not None else None,
             normals=self.normals.to(*args, **kwargs) if self.normals is not None else None,
             flags=self.flags.to(*args, **kwargs) if self.flags is not None else None,
+            semantic_class=self.semantic_class.to(*args, **kwargs) if self.semantic_class is not None else None,
         )
 
     def __getitem__(self, item: Union[int, slice, torch.Tensor]) -> Self:
@@ -337,6 +342,7 @@ class CameraFrameLabels:
             metric_distance=self.metric_distance[item] if self.metric_distance is not None else None,
             normals=self.normals[item] if self.normals is not None else None,
             flags=self.flags[item] if self.flags is not None else None,
+            semantic_class=self.semantic_class[item] if self.semantic_class is not None else None,
         )
 
 

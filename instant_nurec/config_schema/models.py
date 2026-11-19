@@ -81,6 +81,11 @@ class KelvinDPTDecoderConfig(BaseConfigSchema):
     time_encoding_dim: int = Field(default=256, description="Dimension of the time sinusoidal encoding")
     motion_depth: int = Field(default=1, description="Depth of the motion head (V-DPM setup is equivalent to 8)")
 
+    n_semantic_classes: Literal[5, 8] = Field(
+        default=5,
+        description="5 = released classes; 8 adds LANE / CROSSWALK / BOUNDARY (KelvinSemanticClass order)",
+    )
+
     def model_post_init(self, __context) -> None:
         assert self.dpt_dim > 0, "DPT dimension must be positive"
 
@@ -169,6 +174,14 @@ class KelvinModelConfig(BaseConfigSchema):
     init_weights_paths: dict[str, str] = Field(
         default_factory=dict,
         description="Component paths or a full phase-one checkpoint used to initialize training.",
+    )
+    init_full_keep_heads: bool = Field(
+        default=False,
+        description=(
+            "With init_weights_paths.full: keep the checkpoint's Gaussian head and affine post-processing "
+            "instead of re-initializing them (fine-tuning a released model). A 5-class semantic head is "
+            "widened to the configured class count."
+        ),
     )
 
     patch_shape: Tuple[int, int] = Field(default=(14, 14))

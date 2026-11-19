@@ -11,10 +11,11 @@ from pytorch_lightning.callbacks import Callback
 import torch
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler, Sampler
 
-from instant_nurec.config_schema.dataset import NCoreInstantNuRecDatasetConfig
+from instant_nurec.config_schema.dataset import NCoreInstantNuRecDatasetConfig, PMTIndexDatasetConfig
 from instant_nurec.config_schema.train import TrainingConfig
 from instant_nurec.datasets.instantnurec_ncore import NCoreInstantNuRecDataset
 from instant_nurec.datasets.mixture import NCoreMixtureDataset
+from instant_nurec.datasets.pmt_index import PMTIndexDataset
 from instant_nurec.utils.batch import InstantNuRecDataBatch
 
 
@@ -69,6 +70,8 @@ class TrainingDataModule(LightningDataModule):
         self._next_train_batch_idx = int(state_dict.get("next_train_batch_idx", 0))
 
     def _make_dataset(self, dataset_config):
+        if isinstance(dataset_config, PMTIndexDatasetConfig):
+            return PMTIndexDataset(dataset_config, global_seed=self.config.seed, retry_on_error=True)
         if not isinstance(dataset_config, NCoreInstantNuRecDatasetConfig):
             return NCoreMixtureDataset(
                 dataset_config,

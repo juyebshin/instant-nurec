@@ -58,7 +58,15 @@ def _quantile_mean(value: torch.Tensor, quantile: float = 0.98) -> torch.Tensor:
     return flat[flat.argsort()[:keep]].mean()
 
 
+SEMANTIC_IGNORE_INDEX = 255
+
+
 def _semantic_targets(labels) -> torch.Tensor:
+    if labels.semantic_class is not None:
+        targets = labels.semantic_class.squeeze(-1).long()
+        # Ego pixels stay EGO regardless of the source label, as in the reference priority.
+        targets[labels.get_mask_flags_all(RayFlags.EGO_SEMANTIC).squeeze(-1)] = int(KelvinSemanticClass.EGO)
+        return targets
     flags = unpack_optional(labels.flags)
     targets = torch.full(flags.shape[:-1], int(KelvinSemanticClass.OTHERS), dtype=torch.long, device=flags.device)
     # Reference priority (last write wins): ROAD < SKY < MOVABLE < EGO.
@@ -157,6 +165,7 @@ class TrainingLosses(torch.nn.Module):
             values["primitive_semantics"] = F.cross_entropy(
                 semantic_logits.moveaxis(-1, 1),
                 targets,
+                ignore_index=SEMANTIC_IGNORE_INDEX,
             )
 
         if self.config.primitive_normal > 0 and pack.context_world_normal is not None and labels.normals is not None:
