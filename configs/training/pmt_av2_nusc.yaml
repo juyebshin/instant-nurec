@@ -5,7 +5,7 @@
 # Train: 491 AV2 train logs x 10 + 700 nuScenes train scenes x 7 samples (~50/50).
 # Val: 25 AV2 val logs + 25 nuScenes val scenes (fixed draw); AV2 test logs held out.
 seed: 38
-out_dir: /home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/runs
+out_dir: checkpoints/training     # relative to the repo root (scripts/train_pmt_av2_nusc.sh cds there)
 phase: render
 reference_profile: full-model-front-v1
 

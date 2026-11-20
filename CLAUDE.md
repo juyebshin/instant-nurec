@@ -31,17 +31,21 @@ gsplat 1.5.3). The repo is installed editable there. The README's `uv` / `.venv`
 on this machine, because `uv` is not installed. `pytest` and `ruff` are not installed in `sjy-inurec`
 either; they are in pyproject's `dev` group.
 
-gsplat JIT-compiles on the first render and borrows a CUDA toolchain from `sjy-mapnn`. **Append**
-that toolchain to `PATH`; prepending it shadows this env's Python (`ImportError: Self`):
+gsplat JIT-compiles on the first render with the env's own toolchain: conda `cuda-nvcc` 12.8, the
+CUDA 12.8 dev headers torch's extension headers include (cudart, cccl, cuBLAS, cuSPARSE, cuSOLVER,
+cuRAND) and `gxx_linux-64` 11.4, installed into `sjy-inurec` on 2026-11-20 (no other env is needed;
+the command is in `.claude/skills/inurec-env/SKILL.md`). From the repo
+root (`scripts/train_pmt_av2_nusc.sh` sets all of this):
 
 ```bash
-conda activate sjy-inurec
-B=/home/irteam/miniconda3/envs/sjy-mapnn/bin
-export CUDA_HOME=/home/irteam/miniconda3/envs/sjy-mapnn PATH=$PATH:$B TORCH_CUDA_ARCH_LIST=9.0 \
-       CC=$B/x86_64-conda-linux-gnu-gcc CXX=$B/x86_64-conda-linux-gnu-g++ \
+conda activate sjy-inurec                      # sets CC / CXX to its gcc 11.4
+export CUDA_HOME=$CONDA_PREFIX TORCH_EXTENSIONS_DIR=$PWD/.cache/torch_extensions \
        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TORCH_NCCL_USE_COMM_NONBLOCKING=0 NCCL_COMM_BLOCKING=1   # multi-GPU: without these DDP hangs at random steps
 ```
+
+Leave `TORCH_CUDA_ARCH_LIST` unset so the build targets the visible GPUs. The build cache is
+`.cache/torch_extensions/` (gitignored); the first run compiles it in a few minutes.
 
 Inference with released weights (`run.sh` and `run_inference.py` are thin wrappers around this):
 

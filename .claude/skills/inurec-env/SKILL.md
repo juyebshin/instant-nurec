@@ -22,23 +22,34 @@ user decide.
 
 ## gsplat / nvdiffrast JIT
 
-The first render JIT-compiles CUDA kernels, which can take several minutes. The toolchain comes from
-`sjy-mapnn`:
+The first render JIT-compiles CUDA kernels, which can take several minutes. The toolchain is in
+`sjy-inurec` itself (conda `cuda-nvcc` 12.8 + `gxx_linux-64` 11.4, added 2026-11-20); `sjy-mapnn` is
+no longer needed. Installed with (`openssl` pinned so the solver leaves it alone):
 
 ```bash
-B=/home/irteam/miniconda3/envs/sjy-mapnn/bin
-export CUDA_HOME=/home/irteam/miniconda3/envs/sjy-mapnn PATH=$PATH:$B TORCH_CUDA_ARCH_LIST=9.0 \
-       CC=$B/x86_64-conda-linux-gnu-gcc CXX=$B/x86_64-conda-linux-gnu-g++ \
+conda install -n sjy-inurec --freeze-installed -c nvidia/label/cuda-12.8.1 -c conda-forge \
+  cuda-nvcc cuda-cudart-dev cuda-cccl libcublas-dev libcusparse-dev libcusolver-dev libcurand-dev \
+  gxx_linux-64=11.4 gcc_linux-64=11.4 openssl=3.5.9
+```
+
+The compiler alone is not enough: torch's `ATen/cuda/CUDAContextLight.h` includes `cusparse.h`,
+`cublas_v2.h`, `cublasLt.h` and `cusolverDn.h` (`fatal error: cusparse.h: No such file`). Conda puts
+them in `$CONDA_PREFIX/targets/x86_64-linux/include`. From the repo root:
+
+```bash
+conda activate sjy-inurec                      # sets CC / CXX to its gcc 11.4
+export CUDA_HOME=$CONDA_PREFIX TORCH_EXTENSIONS_DIR=$PWD/.cache/torch_extensions \
        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export TORCH_NCCL_USE_COMM_NONBLOCKING=0 NCCL_COMM_BLOCKING=1   # multi-GPU: without these DDP hangs at random steps
 ```
 
 | Symptom | Cause / fix |
 |---|---|
-| `ImportError: Self` (or any `typing` import error) in a subprocess | `sjy-mapnn/bin` was **prepended** to `PATH`, so its Python 3.10 shadows 3.11. Append it instead |
-| gsplat compile error about `nvcc` / the compiler | `CUDA_HOME`, `CC` or `CXX` not exported in *this* shell; a detached job inherits only what was exported |
+| `ImportError: Self` (or any `typing` import error) in a subprocess | another env's `bin` (e.g. the old `sjy-mapnn` toolchain) is ahead of `sjy-inurec` on `PATH`, so its Python 3.10 shadows 3.11 |
+| gsplat compile error about `nvcc` / the compiler | `sjy-inurec` not activated in *this* shell (it sets `CC` / `CXX`), or `CUDA_HOME` not exported; a detached job inherits only what was exported |
 | Compiles every run | the extension cache dir differs between runs or workers. gsplat builds into torch's `_get_build_directory`, so keep `TORCH_EXTENSIONS_DIR` stable |
 | Need to see the build | `VERBOSE=1 python -c "from gsplat.cuda._backend import _C"` (gsplat's own debug trigger). Explicit `BUILD_3DGUT` / `NUM_CHANNELS` env values override Instant NuRec's limited build |
-| `no kernel image is available` | `TORCH_CUDA_ARCH_LIST` doesn't match the GPU (the H200s are 9.0) |
+| `no kernel image is available` | `TORCH_CUDA_ARCH_LIST` set to an arch other than the GPU's (H200 9.0); leave it unset so the build targets the visible GPUs |
 
 ## Other common errors
 

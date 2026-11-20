@@ -11,8 +11,8 @@ State the pass criterion before you launch.
 ## Before launching
 
 1. `nvidia-smi`: the GPUs are shared. Pick a free one and pass it in `CUDA_VISIBLE_DEVICES`.
-2. Export the gsplat toolchain block from `CLAUDE.md` (append `sjy-mapnn/bin` to `PATH`, do not
-   prepend it).
+2. Export the env block from `CLAUDE.md` (or use `scripts/train_pmt_av2_nusc.sh`, which sets it and
+   writes checkpoints under `checkpoints/training/`).
 3. Validate the config and print the values that `model_post_init` may have rewritten:
    ```bash
    python -c "from pathlib import Path; from instant_nurec.training.run import load_training_config as L; c=L(Path('<cfg>')); print(c.phase, c.system.enable_render_global_step, c.system.strategy, c.loss)"

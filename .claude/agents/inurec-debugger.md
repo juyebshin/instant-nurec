@@ -44,8 +44,8 @@ rather than re-deriving.
 
 | Symptom | First suspects |
 |---|---|
-| `ImportError: Self` / wrong Python in a subprocess | `sjy-mapnn/bin` prepended instead of appended to `PATH` |
-| gsplat compile failure on the first render | toolchain exports missing in the detached shell; `TORCH_CUDA_ARCH_LIST`; see `inurec-env` |
+| `ImportError: Self` / wrong Python in a subprocess | another env's `bin` ahead of `sjy-inurec` on `PATH` |
+| gsplat compile failure on the first render | `sjy-inurec` not activated or `CUDA_HOME` not exported in the detached shell; `TORCH_CUDA_ARCH_LIST`; see `inurec-env` |
 | `All context batches must have the same number of images/views` | items in one batch with a different V or T (`_grab_metainfo`); variability must be per batch |
 | `Render-stage training requires independently sampled supervision frames` | render phase with no supervision batch configured |
 | a required-label error from `_required` in `losses.py` | nonzero loss weight with that label absent; set the weight to 0 or provide the label |

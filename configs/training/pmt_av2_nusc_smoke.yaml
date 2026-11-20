@@ -2,7 +2,7 @@
 # + one nuScenes scene, 2 samples each, so both camera sets (7 and 6) are trained within 4 steps.
 # Checks mechanics, peak memory and s/step; then resume for more steps. Not a quality result.
 seed: 38
-out_dir: /home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/runs
+out_dir: checkpoints/training     # relative to the repo root (scripts/train_pmt_av2_nusc.sh cds there)
 phase: render
 reference_profile: full-model-front-v1
 

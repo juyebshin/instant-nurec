@@ -30,6 +30,7 @@ compile_commands.json
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+.cache/
 .coverage
 htmlcov/
 .claude/

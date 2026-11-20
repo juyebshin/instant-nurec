@@ -49,18 +49,20 @@ scenes under `.../index/nusc/{train,val}`. Every keyframe has MoGe-3 depth (DVGT
 34,149) and every frame, sweeps included, has an M2F mask. 6 cameras at 1600×900, ~40 depth keyframes per
 camera per scene.
 
-**Environment.** `sjy-inurec`, plus the gsplat JIT toolchain from `sjy-mapnn`:
+**Environment.** `sjy-inurec` alone. Since 2026-11-20 it carries its own gsplat JIT toolchain (conda
+`cuda-nvcc` 12.8, `gxx_linux-64` 11.4); until then it borrowed `sjy-mapnn`'s. From the repo root:
 
 ```bash
-B=/home/irteam/miniconda3/envs/sjy-mapnn/bin
-export CUDA_HOME=/home/irteam/miniconda3/envs/sjy-mapnn PATH=$PATH:$B TORCH_CUDA_ARCH_LIST=9.0 \
-       CC=$B/x86_64-conda-linux-gnu-gcc CXX=$B/x86_64-conda-linux-gnu-g++ \
+conda activate sjy-inurec                      # sets CC / CXX to its gcc 11.4
+export CUDA_HOME=$CONDA_PREFIX TORCH_EXTENSIONS_DIR=$PWD/.cache/torch_extensions \
        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export TORCH_NCCL_USE_COMM_NONBLOCKING=0 NCCL_COMM_BLOCKING=1   # multi-GPU: without these DDP hangs at random steps
 INSTANT_NUREC_RUN_ID=<run> CUDA_VISIBLE_DEVICES=<gpu> instant-nurec-train --config configs/training/pmt_av2_pilot.yaml
 ```
 
-Append `sjy-mapnn/bin` to `PATH` rather than prepending it. Otherwise its Python 3.10 shadows this
-env's Python in scripts that call `python` (`ImportError: Self`).
+`scripts/train_pmt_av2_nusc.sh` wraps this for the AV2 + nuScenes run and writes checkpoints and the
+console log under `checkpoints/training/` in this repo. (The AV2 pilot configs still write to the PMT
+output directory, where the pilot's checkpoints are.)
 
 ## 2. AV2 pilot (`pmt_av2_pilot.yaml`, run `pmt-av2-pilot-2ep`)
 
