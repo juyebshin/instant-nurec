@@ -12,11 +12,13 @@ rigs, whose Gaussians initialise RoGS road reconstruction in PseudoMapTrainer (P
 | `instant_nurec/datasets/pmt_index.py` (new) | `PMTIndexDataset`: non-NCore logs from per-log index pickles (below). Same batch layout as `NCoreInstantNuRecDataset`: rig = ego, world = first camera's first context frame, global-shutter pinhole cameras, no cuboid tracks. |
 | `config_schema/dataset.py` | `PMTIndexDatasetConfig`. `index_paths` entries can be pickles or directories of pickles. |
 | `training/data.py` | Builds `PMTIndexDataset` for that config. |
+| `config_schema/dataset.py`, `datasets/mixture.py` | A `mixture` component may be a `PMTIndexDatasetConfig`, so datasets with different camera sets (AV2 7, nuScenes 6) mix in one run. |
 | `config_schema/models.py`, `model/backbone/decoders.py` | `KelvinDPTDecoderConfig.n_semantic_classes: 5 \| 8`. `KelvinModelConfig.init_full_keep_heads`: fine-tune the released model, keeping its Gaussian head and affine post-processing. |
 | `primitives/kelvin_primitive.py` | `KelvinSemanticClass` gains LANE 5, CROSSWALK 6, BOUNDARY 7. With them, ROAD means road surface without paint. |
 | `training/system.py` | `_widen_semantic_head`: a released 5-class head is widened to 8. LANE and CROSSWALK start from the ROAD row, BOUNDARY from the OTHERS row, all with bias −2 so the argmax at step 0 is unchanged. |
 | `training/losses.py`, `utils/batch.py` | Optional `CameraFrameLabels.semantic_class` (255 = ignore). When set, it is the semantic-loss target instead of the class implied by the ray flags. EGO pixels stay EGO. |
 | `configs/training/pmt_av2_smoke.yaml`, `pmt_av2_pilot.yaml` (new) | One-step smoke config and the 2-epoch AV2 pilot. |
+| `configs/training/pmt_av2_nusc.yaml`, `pmt_av2_nusc_smoke.yaml` (new) | AV2 + nuScenes fine-tune with 504×280 supervision, and its smoke at the same contract. |
 
 **Index pickles.** These are written by PMT `RoGS/scripts/inurec_finetune_index.py`, which runs
 in env `sjy-rogs` because that env has the AV2 and nuScenes devkits; this env does not. The
@@ -41,6 +43,11 @@ semantic_lut: (256,) uint8                      # Mapillary Vistas v2 id -> Kelv
 
 AV2 index: 695 logs with MoGe-3 depth, split 491 / 101 / 103 into train / val / test under
 `PseudoMapTrainer/RoGS/output/inurec_finetune/index/av2/{train,val,test}`. Test is held out.
+
+nuScenes index (2026-11-20, `logs/export_nusc_all.sh`): the official v1.0-trainval split, 700 train / 150 val
+scenes under `.../index/nusc/{train,val}`. Every keyframe has MoGe-3 depth (DVGT's filter lists keep all
+34,149) and every frame, sweeps included, has an M2F mask. 6 cameras at 1600×900, ~40 depth keyframes per
+camera per scene.
 
 **Environment.** `sjy-inurec`, plus the gsplat JIT toolchain from `sjy-mapnn`:
 
@@ -73,7 +80,8 @@ env's Python in scripts that call `python` (`ImportError: Self`).
 - **Final weights not saved.** `last.ckpt` holds step 9000, not 9820. `make_checkpoint_callback`
   (`training/run.py`) uses `every_n_train_steps` with `save_last`, which never saves at train end,
   so up to `save_every_n_train_steps − 1` steps are lost. The LR schedule moves only per epoch
-  (`current_epoch / max_epochs`), so those were full-rate steps. Not fixed yet.
+  (`current_epoch / max_epochs`), so those were full-rate steps. **Fixed 2026-11-20**
+  (`_StepCheckpoint`: also saves the final step; verified on a 4-step DDP run saving every 3).
 - **Sky head (`sky.*`) is trained from scratch.** It is the render background
   (`training/renderer.py`) and reads `encoded_latent` without detach. Released inference builds an
   observed-sky cubemap instead. Left as is.
@@ -210,6 +218,41 @@ was not trained on.
 2. Verify that the training path accepts a varying camera count and aspect from step to step.
    The pilot always used 7 cameras at 504×280.
 3. Run a short AV2 + nuScenes + DDAD probe for peak memory and s/step.
+
+**AV2 + nuScenes, before DDAD (2026-11-20, `pmt_av2_nusc.yaml`).** Same recipe as the pilot except the
+two-dataset mixture (4,910 AV2 + 4,900 nuScenes samples per epoch) and supervision at the 504×280
+profile resolution instead of 252×140. Val: a fixed draw of 25 AV2 val logs + 25 nuScenes val scenes, so
+its `val/psnr` is not comparable to the pilot's.
+- Smoke (`pmt_av2_nusc_smoke.yaml`, GPU 0 unshared): both camera sets train at batch 1, so the camera
+  count varies from step to step (7 ↔ 6) with no code change. Aspect stays 504×280; varying aspect is
+  still unverified. Every loss finite (velocity skipped: no tracks). Resume from a mid-epoch checkpoint
+  reproduces the same losses and crosses the epoch boundary. Peak ~50 GB (nvidia-smi).
+- Throughput probe (full config, 16 workers, 30 steps): 7.8 s/step including start-up, so 2 epochs
+  (19,620 steps) ≈ 42 h on one unshared H200.
+- Launch (2026-11-20): 2 GPUs × batch 1, lr 2.8e-5 (the pilot's 2e-5 × √2), 4,905 steps / epoch.
+  2-GPU probe on free GPUs 0,1: 8.7 s/step, ~51 GB peak per GPU, so 2 epochs ≈ 24 h. Launcher:
+  `PseudoMapTrainer/RoGS/output/inurec_finetune/logs/av2_nusc.sh` (sets the NCCL blocking env below).
+- **4-GPU DDP hung intermittently; fixed by blocking NCCL comms (2026-11-20).** Without the fix the full
+  config on GPUs 0–3 hung in 6 of 7 runs, at a random step and rank. Native stacks (py-spy) of the stuck
+  rank: its main thread blocked inside NCCL's own enqueue (`ncclCommGetAsyncError` → `ncclGroupJobComplete`,
+  the non-blocking-communicator path) on a tiny per-step collective; the other ranks wait for it. NCCL's
+  per-op log shows identical collective sequences on all ranks, and `TORCH_DISTRIBUTED_DEBUG=DETAIL` found no
+  mismatch. Not the cause: NVLS, `expandable_segments`, the pin-memory thread. **Fix:** launch with
+  `TORCH_NCCL_USE_COMM_NONBLOCKING=0 NCCL_COMM_BLOCKING=1`; 2 of 2 runs then completed 60 steps on 4 GPUs.
+  Side finding: `model/backbone/sky.py:140` builds a buffer on `torch.device("cuda")` in `__init__`, so
+  every rank opens a ~600 MB context on GPU 0.
+- **4-GPU throughput is poor here:** 24.6 s/step at batch 4 (6.2 s/sample) vs 7.8 s/sample on one GPU,
+  with GPU 3 shared with another user's job (80–100% util). Two epochs ≈ 34 h on 4 GPUs vs ≈ 42 h on 1.
+- **Per-GPU batch > 1 (2026-11-20).** A batch must share its context image count (AV2 56, nuScenes 48),
+  so a mixture with `train_batch_size` / `val_batch_size` > 1 uses `GroupedSkipBatchSampler`
+  (`training/data.py`): one component per batch, the batch list a function of (seed, epoch), dealt
+  `rank::world` with padding so every rank runs the same steps. Batch 1 keeps the old sampler. Peak
+  (nvidia-smi): 1/GPU ~50 GB; 2/GPU 80.1 GB on AV2 alone, ~70 GB for a nuScenes batch; 4/GPU ~140 GB
+  (extrapolated, ~30 GB per sample), which does not fit. 2/GPU is at the limit for 80 GB cards.
+  Verified: unit tests (`tests/test_grouped_batch_sampler.py`) and a 2-GPU × batch-2 mixture smoke.
+- Resume edge case: a checkpoint written on an epoch's last batch resumes into the next epoch with the
+  batch cursor still at the end, and that epoch trains no steps (`training/data.py` `SkipBatchSampler`).
+  Not hit when the epoch length is not a multiple of `save_every_n_train_steps`.
 
 **Risks.**
 - **Compute.** The single-dataset pilot took ~30 h on one shared GPU, and the box's GPUs are

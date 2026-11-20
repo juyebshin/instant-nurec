@@ -40,6 +40,7 @@ B=/home/irteam/miniconda3/envs/sjy-mapnn/bin
 export CUDA_HOME=/home/irteam/miniconda3/envs/sjy-mapnn PATH=$PATH:$B TORCH_CUDA_ARCH_LIST=9.0 \
        CC=$B/x86_64-conda-linux-gnu-gcc CXX=$B/x86_64-conda-linux-gnu-g++ \
        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export TORCH_NCCL_USE_COMM_NONBLOCKING=0 NCCL_COMM_BLOCKING=1   # multi-GPU: without these DDP hangs at random steps
 ```
 
 Inference with released weights (`run.sh` and `run_inference.py` are thin wrappers around this):

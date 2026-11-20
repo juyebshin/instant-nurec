@@ -28,13 +28,13 @@ Be accurate about this in every plan and report. Sources: `docs/PMT_FINETUNE.md`
 | Released profiles `pa-front`, `pa-multiview` (1/3/5 cameras, 504×280, T=18), `pq-front` | implemented (upstream) |
 | Two-phase dense front-camera training | implemented (upstream) |
 | Upstream random 1/3/5-camera, 12/16/18-frame multiview curriculum | **not in this repo** |
-| Fine-tune on non-NCore logs (`PMTIndexDataset`; the exporter handles AV2 and nuScenes) | implemented. AV2 pilot done: 2 epochs, val PSNR 22.99, but `last.ckpt` holds step 9000 of 9820. **nuScenes not trained.** |
+| Fine-tune on non-NCore logs (`PMTIndexDataset`; the exporter handles AV2 and nuScenes) | implemented. AV2 pilot done: 2 epochs, val PSNR 22.99, but `last.ckpt` holds step 9000 of 9820. nuScenes index exported (700 / 150 scenes) and AV2 + nuScenes mixture smoke-tested (`pmt_av2_nusc.yaml`); **not trained yet.** |
 | 8-class semantic head (+ LANE, CROSSWALK, BOUNDARY) | implemented. At step 9000, LANE is argmax on 0.4–1.1% of pixels and CROSSWALK on ≤ 0.1%. BOUNDARY not reported. |
 | HD map: ROAD Gaussians vs LiDAR road (road test, 3 AV2 logs) | measured. Height reaches the MoGe-label level (median \|dz\| 0.025–0.039 m). **IoU is 2–4 points below step 1000, cause not found.** |
 | RoGS training initialised from these Gaussians | **not reported here.** Do not claim it. |
 | Multi-rig geometry | **planned** (`PMT_FINETUNE.md` §3). Zero-shot range ratio is 0.47 (Waymo) to 1.01 (HRDX). |
 | Index export for DDAD / KITTI / OpenScene | **not implemented** |
-| Varying camera count or aspect from step to step in training | **unverified.** The pilot always used 7 cameras at 504×280. |
+| Varying camera count or aspect from step to step in training | camera count verified (7 ↔ 6 at batch 1, AV2 + nuScenes smoke, 2026-11-20). **Aspect unverified**: always 504×280. |
 | Save on train end | **known bug, not fixed** (`training/run.py::make_checkpoint_callback`) |
 | Occupancy: head, GT loader, metric | **not implemented.** `KelvinStaticLayer.voxelize` merges Gaussians; it is not occupancy. |
 | Simulation export: PLY, sky, dynamic `.npz`, calibrated preview / video | implemented (upstream), released weights only. The public CLI does not load fine-tuned `.ckpt`. |
