@@ -9,7 +9,7 @@ import weakref
 from pytorch_lightning import LightningDataModule
 from pytorch_lightning.callbacks import Callback
 import torch
-from torch.utils.data import BatchSampler, DataLoader, RandomSampler, Sampler
+from torch.utils.data import BatchSampler, DataLoader, RandomSampler, Sampler, SequentialSampler
 
 from instant_nurec.config_schema.dataset import NCoreInstantNuRecDatasetConfig, PMTIndexDatasetConfig
 from instant_nurec.config_schema.train import TrainingConfig
@@ -51,6 +51,68 @@ class SkipBatchSampler(BatchSampler):
     # Do not subtract ``first_batch_idx`` here. Lightning restores its loop
     # progress from the checkpoint and needs the original number of batches to
     # continue emitting epoch-global batch indices (and scheduler progress).
+
+
+class GroupedSkipBatchSampler(SkipBatchSampler):
+    """Batches drawn from one group (mixture component) at a time.
+
+    A batch must share its context image count (``KelvinInstantNuRec._grab_metainfo``), which differs
+    between datasets (AV2 7 cameras, nuScenes 6). Groups are contiguous index ranges of ``group_sizes``.
+    The batch list depends only on ``seed`` and ``epoch``, so every rank builds the same list; it is
+    padded by repeating batches (as ``DistributedSampler`` pads indices) and dealt ``rank::world_size``,
+    so all ranks run the same number of steps. Lightning re-instantiates this with its
+    ``DistributedSampler`` as ``sampler``; only that sampler's ``num_replicas`` and ``rank`` are read.
+    """
+
+    def __init__(
+        self,
+        sampler: Sampler,
+        batch_size: int,
+        drop_last: bool = False,
+        first_batch_idx: int = 0,
+        group_sizes: tuple[int, ...] = (),
+        seed: int = 0,
+        epoch: int = 0,
+        shuffle: bool = True,
+    ) -> None:
+        super().__init__(sampler, batch_size, drop_last, first_batch_idx)
+        if not group_sizes or min(group_sizes) < 1:
+            raise ValueError(f"group_sizes must be positive, got {group_sizes}")
+        self.group_sizes = tuple(group_sizes)
+        self.seed, self.epoch, self.shuffle = seed, epoch, shuffle
+
+    def _world(self) -> tuple[int, int]:
+        return getattr(self.sampler, "num_replicas", 1), getattr(self.sampler, "rank", 0)
+
+    def _n_batches(self) -> int:
+        n = sum(s // self.batch_size if self.drop_last else -(-s // self.batch_size) for s in self.group_sizes)
+        return -(-n // self._world()[0])
+
+    def _rank_batches(self) -> list[list[int]]:
+        generator = torch.Generator().manual_seed(self.seed + self.epoch)
+        batches, start = [], 0
+        for size in self.group_sizes:
+            order = torch.randperm(size, generator=generator) if self.shuffle else torch.arange(size)
+            chunks = (order + start).split(self.batch_size)
+            if self.drop_last and len(chunks[-1]) < self.batch_size:
+                chunks = chunks[:-1]
+            batches += [chunk.tolist() for chunk in chunks]
+            start += size
+        if self.shuffle:
+            batches = [batches[i] for i in torch.randperm(len(batches), generator=generator).tolist()]
+        world_size, rank = self._world()
+        n_unique = len(batches)
+        while len(batches) % world_size:
+            batches.append(batches[len(batches) % n_unique])
+        return batches[rank::world_size]
+
+    def __iter__(self):
+        for batch_idx, batch in enumerate(self._rank_batches()):
+            if batch_idx >= self.first_batch_idx:
+                yield batch
+
+    def __len__(self) -> int:
+        return self._n_batches()
 
 
 class TrainingDataModule(LightningDataModule):
@@ -107,11 +169,23 @@ class TrainingDataModule(LightningDataModule):
         # SkipBatchSampler, retaining first_batch_idx.
         epoch = trainer.current_epoch if trainer is not None else 0
         generator = torch.Generator().manual_seed(self.config.seed + epoch)
-        batch_sampler = SkipBatchSampler(
-            sampler=RandomSampler(self.train_dataset, generator=generator),
-            batch_size=self.config.system.train_batch_size,
-            first_batch_idx=self._next_train_batch_idx,
-        )
+        batch_size = self.config.system.train_batch_size
+        if batch_size > 1 and isinstance(self.train_dataset, NCoreMixtureDataset):
+            # One component per batch: components differ in context image count.
+            batch_sampler = GroupedSkipBatchSampler(
+                sampler=RandomSampler(self.train_dataset, generator=generator),
+                batch_size=batch_size,
+                first_batch_idx=self._next_train_batch_idx,
+                group_sizes=tuple(component.sampled_length for component in self.train_dataset.datasets),
+                seed=self.config.seed,
+                epoch=epoch,
+            )
+        else:
+            batch_sampler = SkipBatchSampler(
+                sampler=RandomSampler(self.train_dataset, generator=generator),
+                batch_size=batch_size,
+                first_batch_idx=self._next_train_batch_idx,
+            )
         return DataLoader(
             self.train_dataset,
             num_workers=self.config.system.train_num_workers,
@@ -136,11 +210,20 @@ class TrainingDataModule(LightningDataModule):
             # Validation samples are deliberately epoch-independent.  Only the
             # augmentation epoch changes; rng_epoch stays at its default -1.
             self.val_dataset.set_epoch(trainer.current_epoch)
+        batching = {"batch_size": self.config.system.val_batch_size, "shuffle": False}
+        if self.config.system.val_batch_size > 1 and isinstance(self.val_dataset, NCoreMixtureDataset):
+            batching = {
+                "batch_sampler": GroupedSkipBatchSampler(
+                    sampler=SequentialSampler(self.val_dataset),
+                    batch_size=self.config.system.val_batch_size,
+                    group_sizes=tuple(component.sampled_length for component in self.val_dataset.datasets),
+                    shuffle=False,
+                )
+            }
         return DataLoader(
             self.val_dataset,
-            batch_size=self.config.system.val_batch_size,
+            **batching,
             num_workers=self.config.system.val_num_workers,
-            shuffle=False,
             pin_memory=False,
             persistent_workers=False,
             collate_fn=InstantNuRecDataBatch.collate_fn,
