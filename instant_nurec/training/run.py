@@ -120,9 +120,21 @@ def initialize_resume_logger_before_distributed_setup(config: TrainingConfig, tr
     return True
 
 
+class _StepCheckpoint(ModelCheckpoint):
+    """Also save the final step. ``every_n_train_steps`` never fires at train end, and Lightning's own
+    ``on_train_end`` writes ``last.ckpt`` only if none was ever written, so up to N - 1 steps were lost."""
+
+    def on_train_end(self, trainer, pl_module) -> None:
+        if not self._should_skip_saving_checkpoint(trainer):  # skips a step that is already saved
+            monitor_candidates = self._monitor_candidates(trainer)
+            self._save_topk_checkpoint(trainer, monitor_candidates)
+            self._save_last_checkpoint(trainer, monitor_candidates)
+        super().on_train_end(trainer, pl_module)
+
+
 def make_checkpoint_callback(config: TrainingConfig, out_dir: Path) -> ModelCheckpoint:
     if config.system.save_every_n_train_steps is not None:
-        return ModelCheckpoint(
+        return _StepCheckpoint(
             dirpath=out_dir / "checkpoints",
             filename="epoch={epoch:02d}-step={step}",
             save_last=True,
