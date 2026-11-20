@@ -229,9 +229,10 @@ its `val/psnr` is not comparable to the pilot's.
   reproduces the same losses and crosses the epoch boundary. Peak ~50 GB (nvidia-smi).
 - Throughput probe (full config, 16 workers, 30 steps): 7.8 s/step including start-up, so 2 epochs
   (19,620 steps) ≈ 42 h on one unshared H200.
-- Launch (2026-11-20): 2 GPUs × batch 1, lr 2.8e-5 (the pilot's 2e-5 × √2), 4,905 steps / epoch.
-  2-GPU probe on free GPUs 0,1: 8.7 s/step, ~51 GB peak per GPU, so 2 epochs ≈ 24 h. Launcher:
-  `PseudoMapTrainer/RoGS/output/inurec_finetune/logs/av2_nusc.sh` (sets the NCCL blocking env below).
+- Launch: `scripts/train_pmt_av2_nusc.sh` (sets the NCCL blocking env below; `GPUS` overrides the
+  default 0,1,2,3). Config: 4 GPUs × batch 2 (total 8), lr 5.7e-5 (the pilot's 2e-5 × √8), 1,227 steps /
+  epoch. Measured so far: 2 GPUs × batch 1 on free GPUs 8.7 s/step (~51 GB); batch 2 peaks ~80 GB per GPU;
+  s/step at batch 2 not measured.
 - **4-GPU DDP hung intermittently; fixed by blocking NCCL comms (2026-11-20).** Without the fix the full
   config on GPUs 0–3 hung in 6 of 7 runs, at a random step and rank. Native stacks (py-spy) of the stuck
   rank: its main thread blocked inside NCCL's own enqueue (`ncclCommGetAsyncError` → `ncclGroupJobComplete`,

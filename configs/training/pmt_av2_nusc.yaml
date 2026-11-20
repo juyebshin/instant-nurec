@@ -1,6 +1,6 @@
 # Joint fine-tune of the released pa-multiview model on AV2 + nuScenes (PseudoMapTrainer indexes).
-# Same recipe as pmt_av2_pilot.yaml except: (0) 2 GPUs (batch 2), lr 2.8e-5; (1) a two-dataset mixture, each with its own camera set
-# (AV2 7 ring cameras, nuScenes 6), so the camera count varies from step to step at batch 1;
+# Same recipe as pmt_av2_pilot.yaml except: (0) 4 GPUs x batch 2 (total 8), lr 5.7e-5; (1) a two-dataset mixture, each with its own camera set
+# (AV2 7 ring cameras, nuScenes 6); each batch holds one dataset, so the camera count varies per batch;
 # (2) supervision at the 504x280 profile resolution instead of 252x140.
 # Train: 491 AV2 train logs x 10 + 700 nuScenes train scenes x 7 samples (~50/50).
 # Val: 25 AV2 val logs + 25 nuScenes val scenes (fixed draw); AV2 test logs held out.
@@ -73,14 +73,14 @@ model:
     n_semantic_classes: 8
 
 system:
-  max_epochs: 2                  # 4910 + 4900 = 9810 samples / epoch = 4905 steps at 2 GPUs x batch 1
-  train_batch_size: 1
-  val_batch_size: 1
+  max_epochs: 2                  # 9810 samples / epoch = 4905 one-dataset batches = 1227 steps on 4 GPUs
+  train_batch_size: 2
+  val_batch_size: 2
   train_num_workers: 16
   val_num_workers: 4
   precision: bf16-mixed
   accelerator: gpu
-  devices: 2                     # DDP: launch with TORCH_NCCL_USE_COMM_NONBLOCKING=0 NCCL_COMM_BLOCKING=1
+  devices: 4                     # DDP: launch with TORCH_NCCL_USE_COMM_NONBLOCKING=0 NCCL_COMM_BLOCKING=1
   num_nodes: 1
   strategy: auto
   enable_render_global_step: 0
@@ -91,7 +91,7 @@ system:
   checkpoint_mode: max
   save_top_k: 2
   optimizer:
-    lr: 2.8e-5                   # pilot's 2e-5 at batch 1, x sqrt(2) for batch 2 (2 GPUs)
+    lr: 5.7e-5                   # pilot's 2e-5 at batch 1, x sqrt(8) for total batch 8 (4 GPUs x 2)
   scheduler:
     warmup_steps: 500
 
