@@ -1,0 +1,110 @@
+# Joint fine-tune of the released pa-multiview model on AV2 + nuScenes (PseudoMapTrainer indexes).
+# Same recipe as pmt_av2_pilot.yaml except: (0) 2 GPUs (batch 2), lr 2.8e-5; (1) a two-dataset mixture, each with its own camera set
+# (AV2 7 ring cameras, nuScenes 6), so the camera count varies from step to step at batch 1;
+# (2) supervision at the 504x280 profile resolution instead of 252x140.
+# Train: 491 AV2 train logs x 10 + 700 nuScenes train scenes x 7 samples (~50/50).
+# Val: 25 AV2 val logs + 25 nuScenes val scenes (fixed draw); AV2 test logs held out.
+seed: 38
+out_dir: /home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/runs
+phase: render
+reference_profile: full-model-front-v1
+
+logger:
+  name: csv
+  run_name: pmt-av2-nusc
+
+_sampling: &sampling
+  camera_subsampler: {frame_width: 504, frame_height: 280}
+  n_frames_per_sample: 8
+  frame_gap_us: 500000
+  supervision_frame_batch:
+    n_frames_per_camera: 1
+    prepend_timestamps_us: 100000
+    append_timestamps_us: 100000
+    sample_strategy: random
+    camera_subsampler: {frame_width: 504, frame_height: 280}
+    include_context_frames: true
+_av2_cams: &av2_cams [ring_front_center, ring_front_right, ring_front_left, ring_rear_right, ring_rear_left,
+                      ring_side_right, ring_side_left]
+_nusc_cams: &nusc_cams [CAM_FRONT, CAM_FRONT_LEFT, CAM_FRONT_RIGHT, CAM_BACK, CAM_BACK_LEFT, CAM_BACK_RIGHT]
+
+dataset:
+  train:
+    mixture:
+      av2:
+        config:
+          <<: *sampling
+          index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/av2/train]
+          camera_ids: *av2_cams
+          n_samples_per_sequence: 10
+      nusc:
+        config:
+          <<: *sampling
+          index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/nusc/train]
+          camera_ids: *nusc_cams
+          n_samples_per_sequence: 7
+  val:
+    mixture:
+      av2:
+        sample_ratio: 0.25        # 25 of 101 val logs
+        config:
+          <<: *sampling
+          index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/av2/val]
+          camera_ids: *av2_cams
+          n_samples_per_sequence: 1
+      nusc:
+        sample_ratio: 0.17        # 25 of 150 val scenes
+        config:
+          <<: *sampling
+          index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/nusc/val]
+          camera_ids: *nusc_cams
+          n_samples_per_sequence: 1
+
+model:
+  freeze_encoder: false
+  init_weights_paths:
+    full: /home1/irteam/workspace/instant-nurec/checkpoints/pth/instant_nurec_pa_multiview_1.1.0.pth
+  init_full_keep_heads: true
+  post_processing:
+    enabled: true
+    optimization_start_global_step: 1000
+  decoder:
+    name: dpt-decoder
+    n_semantic_classes: 8
+
+system:
+  max_epochs: 2                  # 4910 + 4900 = 9810 samples / epoch = 4905 steps at 2 GPUs x batch 1
+  train_batch_size: 1
+  val_batch_size: 1
+  train_num_workers: 16
+  val_num_workers: 4
+  precision: bf16-mixed
+  accelerator: gpu
+  devices: 2                     # DDP: launch with TORCH_NCCL_USE_COMM_NONBLOCKING=0 NCCL_COMM_BLOCKING=1
+  num_nodes: 1
+  strategy: auto
+  enable_render_global_step: 0
+  limit_val_batches: 50
+  log_every_n_steps: 10
+  save_every_n_train_steps: 1000
+  checkpoint_monitor: val/psnr
+  checkpoint_mode: max
+  save_top_k: 2
+  optimizer:
+    lr: 2.8e-5                   # pilot's 2e-5 at batch 1, x sqrt(2) for batch 2 (2 GPUs)
+  scheduler:
+    warmup_steps: 500
+
+# As pmt_av2_pilot.yaml. A render-phase loss block must list every weight (omitted ones become 0).
+loss:
+  primitive_sky_cubemap: 0.01
+  primitive_rgb: 0.1
+  primitive_distance: 1.0
+  primitive_distance_gradient: 1.0
+  primitive_semantics: 0.1
+  primitive_normal: 0.2
+  primitive_velocity: 1.0
+  rgb: 1.0
+  lpips: 0.2
+  distance: 0.1
+  background: 2.0

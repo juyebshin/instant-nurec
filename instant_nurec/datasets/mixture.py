@@ -11,9 +11,10 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from instant_nurec.config_schema.dataset import NCoreMixtureDatasetConfig
+from instant_nurec.config_schema.dataset import NCoreMixtureDatasetConfig, PMTIndexDatasetConfig
 from instant_nurec.datasets.instantnurec_base import BaseInstantNuRecIndexableDataset
 from instant_nurec.datasets.instantnurec_ncore import NCoreInstantNuRecDataset
+from instant_nurec.datasets.pmt_index import PMTIndexDataset
 from instant_nurec.utils.batch import InstantNuRecDataBatch
 
 
@@ -26,7 +27,7 @@ class NCoreMixtureDataset(BaseInstantNuRecIndexableDataset[InstantNuRecDataBatch
     @dataclass
     class SubDataset:
         name: str
-        dataset: NCoreInstantNuRecDataset
+        dataset: NCoreInstantNuRecDataset | PMTIndexDataset
         sample_ratio: float
         full_length: int = field(init=False)
         sampled_length: int = field(init=False)
@@ -67,6 +68,10 @@ class NCoreMixtureDataset(BaseInstantNuRecIndexableDataset[InstantNuRecDataBatch
             if component.sample_ratio == 0:
                 continue
             dataset_config = component.config
+            if isinstance(dataset_config, PMTIndexDatasetConfig):
+                dataset = PMTIndexDataset(dataset_config, global_seed=global_seed, retry_on_error=retry_on_error)
+                self.datasets.append(self.SubDataset(name, dataset, component.sample_ratio))
+                continue
             dataset = NCoreInstantNuRecDataset(
                 dataset_config,
                 frame_width=dataset_config.camera_subsampler.frame_width,

@@ -207,17 +207,6 @@ class NCoreInstantNuRecDatasetConfig(BaseConfigSchema):
             raise ValueError("Either ncore_json_paths or ncore_json_list_path must be provided")
 
 
-class NCoreMixtureComponentConfig(BaseConfigSchema):
-    sample_ratio: float = Field(default=1.0, ge=0.0)
-    config: NCoreInstantNuRecDatasetConfig
-
-
-class NCoreMixtureDatasetConfig(BaseConfigSchema):
-    """Official-style named mixture of independently configured NCore datasets."""
-
-    mixture: dict[str, NCoreMixtureComponentConfig] = Field(min_length=1)
-
-
 class PMTIndexDatasetConfig(BaseConfigSchema):
     """Non-NCore logs (AV2 / nuScenes) from per-log index pickles written by
     PseudoMapTrainer ``RoGS/scripts/inurec_finetune_index.py``.
@@ -239,6 +228,17 @@ class PMTIndexDatasetConfig(BaseConfigSchema):
     depth: bool = True
     semantic_segmentation: bool = True
     supervision_frame_batch: SupervisionFrameBatchConfig = Field(default_factory=SupervisionFrameBatchConfig)
+
+
+class NCoreMixtureComponentConfig(BaseConfigSchema):
+    sample_ratio: float = Field(default=1.0, ge=0.0)
+    config: NCoreInstantNuRecDatasetConfig | PMTIndexDatasetConfig  # PMT: e.g. AV2 + nuScenes, own camera sets
+
+
+class NCoreMixtureDatasetConfig(BaseConfigSchema):
+    """Official-style named mixture of independently configured NCore datasets."""
+
+    mixture: dict[str, NCoreMixtureComponentConfig] = Field(min_length=1)
 
 
 NCoreTrainDatasetConfig = PMTIndexDatasetConfig | NCoreInstantNuRecDatasetConfig | NCoreMixtureDatasetConfig
