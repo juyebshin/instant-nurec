@@ -19,35 +19,71 @@ rigs, whose Gaussians initialise RoGS road reconstruction in PseudoMapTrainer (P
 | `training/losses.py`, `utils/batch.py` | Optional `CameraFrameLabels.semantic_class` (255 = ignore). When set, it is the semantic-loss target instead of the class implied by the ray flags. EGO pixels stay EGO. |
 | `configs/training/pmt_av2_smoke.yaml`, `pmt_av2_pilot.yaml` (new) | One-step smoke config and the 2-epoch AV2 pilot. |
 | `configs/training/pmt_av2_nusc.yaml`, `pmt_av2_nusc_smoke.yaml` (new) | AV2 + nuScenes fine-tune with 504×280 supervision, and its smoke at the same contract. |
+| `configs/training/pmt_geo_av2_nusc_waymo.yaml`, `pmt_geo_waymo_smoke.yaml` (new) | AV2 + nuScenes + Waymo on the geo splits PMT and mapnn use (§3), and a smoke of the Waymo path. |
+| `datasets/pmt_index.py`, `training/losses.py`, `config_schema/train.py` | Index cameras with lens `distortion` (undistorted on load) and a separate `depth_grid`; the semantic loss is skipped, not NaN, on a batch with no mask; `loss.background_requires_semantics` (default off). |
 
 **Index pickles.** These are written by PMT `RoGS/scripts/inurec_finetune_index.py`, which runs
 in env `sjy-rogs` because that env has the AV2 and nuScenes devkits; this env does not. The
-exporter currently handles AV2 and nuScenes.
+exporter handles AV2, nuScenes and (2026-11-21) Waymo.
 
 ```
 cameras: {name: {K, wh, T_cam_ego}}             # OpenCV camera frame
 rig: {timestamps_us, T_ego_world}               # ego pose at every image timestamp
 frames: {name: [{t_us, img, seg, depth}, ...]}  # every image; seg / depth may be None
 semantic_lut: (256,) uint8                      # Mapillary Vistas v2 id -> KelvinSemanticClass, 255 = ignore
+# optional per camera (Waymo): distortion {K, D, wh}  -> img files are raw, undistorted onto K / wh on load
+#                              depth_grid {K, wh}     -> the depth files' own pinhole grid, resampled onto K / wh
 ```
 
 **Labels.**
-- **Depth:** DVGT's LiDAR-aligned MoGe-3 depth (`DVGT/public_datasets/data_annotation_moge3/align_depth`).
+- **Depth:** LiDAR-aligned MoGe-3 depth made by DVGT's pipeline, copied 2026-11-21 to this repo's
+  `data/moge3/align_depth` with its labeling code in `tools/moge_labels/` (README there: provenance, data
+  layout). Index pickles reference only `instant-nurec/data/` (symlinks to the datasets and Mask2Former
+  outputs, plus that copy); pickles exported earlier were rewritten by `logs/rewrite_index_paths.py`.
   It is stored as log-encoded uint16 camera-z PNGs and converted to ray distance in
   `pmt_index.read_log_depth` / `z_to_ray_distance`.
 - **Normals:** derived from that depth in `KelvinInstantNuRec.prepare_context` (`model/kelvin.py`),
   so the `primitive_normal` loss is active.
-- **Semantics:** M2F Mapillary-v2 masks from the RoGS label dirs, mapped to the 8 classes.
+- **Semantics:** M2F Mapillary-v2 masks from the RoGS label dirs, mapped to the 8 classes. AV2 and
+  nuScenes have them. Waymo masks come from PMT `Mask2Former/demo/inference_waymo.py` (in progress
+  2026-11-21) into `PMT/data/m2f_infer_waymo/<segment>/seg_<camera>/<t_us>.png`, predicted on the raw
+  distorted jpgs; the loader undistorts them nearest-neighbour onto the image grid. Until a segment's
+  masks exist (then `logs/export_geo.sh` with `REEXPORT_WAYMO=1`), its frames carry `semantic_class` 255.
 - **Coverage:** depth exists only on 2 Hz keyframes. `context_requires_depth` draws context
   frames from those.
 
 AV2 index: 695 logs with MoGe-3 depth, split 491 / 101 / 103 into train / val / test under
-`PseudoMapTrainer/RoGS/output/inurec_finetune/index/av2/{train,val,test}`. Test is held out.
+`PseudoMapTrainer/RoGS/output/inurec_finetune/index/av2/{train,val,test}`. Test is held out. These 695
+are exactly the AV2 geo-train logs. DVGT added depth for the other 305 logs on 2026-11-20 (same 2 Hz
+keyframes), so all 1000 AV2 logs now have it.
 
 nuScenes index (2026-11-20, `logs/export_nusc_all.sh`): the official v1.0-trainval split, 700 train / 150 val
 scenes under `.../index/nusc/{train,val}`. Every keyframe has MoGe-3 depth (DVGT's filter lists keep all
 34,149) and every frame, sweeps included, has an M2F mask. 6 cameras at 1600×900, ~40 depth keyframes per
 camera per scene.
+
+Waymo index (2026-11-21): `data/waymo_ns` → `/home1/irteam/data/waymo_ns`, converted by DVGT (moved out of DVGT
+`public_datasets/` 2026-11-21; nerfstudio layout, 1000 segments, 5 cameras
+at 10 Hz) with DVGT's MoGe-3 depth on every 5th frame (2 Hz; 35–40 per camera per segment). Three things
+differ from AV2 / nuScenes:
+- **Lens distortion** (k2 ≈ −0.3). The images are undistorted on load onto
+  `cv2.getOptimalNewCameraMatrix(alpha=0)`, which keeps the full raw frame with no black border.
+- **Depth on DVGT's own grid.** DVGT undistorts, resizes and crops around the principal point, then
+  resizes back to the raw aspect, so its pixels are anisotropic (side cameras fx 756 vs fy 1364). The
+  exporter reproduces that grid with DVGT's own functions and asserts it matches the PNG size; the loader
+  resamples depth onto the image grid. The side cameras' principal point sits high (cy ≈ 240 of 886), so
+  their depth covers only the upper ~55% of the frame; the lower band, mostly near road, has no depth.
+- **Poses.** Ego = the vehicle pose at the frame timestamp (waymo_ns gives all cameras the lidar
+  timestamp) times the static extrinsic. waymo_ns also stores a per-image camera pose, which differs from
+  this by up to 0.2 m on the segment checked (rolling shutter / trigger time). DVGT aligns its depth with the
+  same static-extrinsic convention. Rolling shutter is not modelled.
+Checked on one segment: depth overlaid on the undistorted images lines up at pole, tree, car and wall edges.
+
+Geo-split tree (2026-11-21, `logs/export_geo.sh`): `.../index/geo/{av2,nusc,waymo}/{train,val}`, from the
+"near" lists, copied to `configs/splits/geo_near/` (README there: PMT's AV2 / nuScenes lists, identical to
+mapnn's, and mapnn's Waymo list, commit 8ef6637). AV2 695 / 150; nuScenes 554 / 99 (the lists name
+657 / 124, but 103 / 25 of those scenes are from the official test split, which has no MoGe depth); Waymo
+700 / 151. AV2 geo-train and nuScenes are symlinks to the pickles above; geo-test is not indexed.
 
 **Environment.** `sjy-inurec` alone. Since 2026-11-20 it carries its own gsplat JIT toolchain (conda
 `cuda-nvcc` 12.8, `gxx_linux-64` 11.4); until then it borrowed `sjy-mapnn`'s. From the repo root:
@@ -189,7 +225,8 @@ was not trained on.
   | KITTI | 5 date folders; 74.7k frames in the filtered train list | no |
   | OpenScene | 9 entries | no; completeness unchecked |
 
-  DVGT's filtered annotation lists are in `DVGT/data_annotation/meta/moge3_vitl/moge_pred_filter_parquet`.
+  DVGT's filtered annotation lists: `data/moge3/meta/moge_pred_filter_parquet` (copied from DVGT for AV2,
+  nuScenes and Waymo).
 - **Waymo and HRDX have no aligned MoGe-3 labels here.** That makes them natural held-out rigs,
   and mapnn's `inurec_zeroshot_diag.py` already scores them against LiDAR.
 
@@ -257,14 +294,41 @@ its `val/psnr` is not comparable to the pilot's.
   batch cursor still at the end, and that epoch trains no steps (`training/data.py` `SkipBatchSampler`).
   Not hit when the epoch length is not a multiple of `save_every_n_train_steps`.
 
+**AV2 + nuScenes + Waymo on geo splits (2026-11-21, `pmt_geo_av2_nusc_waymo.yaml`).** The user chose to
+train on Waymo, on the geographically disjoint splits PMT and mapnn train and evaluate on, so numbers are
+comparable with theirs. Same recipe as `pmt_av2_nusc.yaml` except: geo splits; Waymo added; 695 AV2 × 5 +
+554 nuScenes × 6 + 700 Waymo × 5 = 10,299 samples per epoch (about a third each), 1,288 steps / epoch on
+4 GPUs × batch 2; val a fixed draw of 25 geo-val logs per dataset; `background_requires_semantics: true`.
+- **Waymo masks (pending).** The current Waymo pickles have none, so a Waymo batch skips the semantic loss
+  (it used to return NaN on an all-ignore target) and trains no sky cubemap. Without
+  `background_requires_semantics` the background loss would treat Waymo sky as foreground (target opacity
+  1) and push the model to paint the sky. Once `inference_waymo.py` has run, re-export the Waymo pickles
+  (`REEXPORT_WAYMO=1 logs/export_geo.sh`) and Waymo trains semantics and sky like AV2; the flag then only
+  matters for frames without a mask. A run started before the re-export keeps the mask-less pickles.
+- **Waymo is no longer a held-out rig.** HRDX still is. Waymo geo-test (149 segments) stays held out by
+  log, and mapnn's zero-shot Waymo number is now in-domain for this model.
+- **Road test logs:** 7fab is AV2 geo-val; 02678d04 and 0b5142c1 are geo-train, so on this model the
+  road test scores two training logs.
+- Verified: unit tests (`tests/test_pmt_mixed_labels.py`), all 2,349 index pickles load, and one item per
+  dataset through the full config on CPU (context 56 / 48 / 40 images; depth valid 95% / 89% / 75%).
+  Smoke (`pmt_geo_waymo_smoke.yaml`, one Waymo geo-train segment, batch 1, GPU 2 shared with the
+  AV2 + nuScenes run): 2 steps + val, every loss finite, `last.ckpt` written, val PSNR 15.70; skipped as
+  designed: background, primitive_semantics, primitive_velocity. `primitive_distance` is 11.2 / 10.4 m at
+  steps 0 / 1 (AV2 + nuScenes smoke: total loss 6.7–8.0), in line with the released model's zero-shot
+  Waymo range ratio of 0.47 (§3). Peak memory and s/step not measured (GPU shared). The full 3-dataset
+  config on 4 GPUs has not been run.
+- **Licence.** Waymo Open Dataset terms now apply to these checkpoints; they are not yet recorded in
+  mapnn `docs/data-provenance.md` ("Other datasets").
+
 **Risks.**
 - **Compute.** The single-dataset pilot took ~30 h on one shared GPU, and the box's GPUs are
   mostly occupied.
 - **Label quality varies by dataset.** Use DVGT's filtered lists.
-- **The semantic head sees only AV2 and nuScenes.** It may drift on other rigs.
+- **The semantic head sees only AV2 and nuScenes.** It may drift on other rigs, Waymo included.
 
 **Open decisions.**
-- Held-out rigs: Waymo and HRDX, or Waymo in training.
+- Held-out rigs: decided 2026-11-21 for `pmt_geo_av2_nusc_waymo.yaml`: Waymo in training (geo split),
+  HRDX held out.
 - Keep the 8-class semantic head or train geometry only.
 - Initialise from step 9000 or from the released weights.
 - GPU budget.

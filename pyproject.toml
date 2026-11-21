@@ -101,6 +101,8 @@ line-length = 120
 exclude = [
     # Prevent checking ci-cache files
     ".ci-keep",
+    # Copied from DVGT unchanged apart from paths (tools/moge_labels/README.md); keep it diffable against DVGT
+    "tools/moge_labels",
 ]
 
 [tool.ruff.lint.per-file-ignores]

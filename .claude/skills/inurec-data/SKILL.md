@@ -56,10 +56,11 @@ held out.**
 | DDAD | 150 scenes | no | next to export (`research-goals.md` roadmap) |
 | KITTI | 74.7k frames in filtered list | no | after DDAD, if labels are complete |
 | OpenScene | 9 entries, completeness unchecked | no | unverified |
-| Waymo, HRDX | none here | — | candidate held-out rigs, scored by mapnn's zero-shot diag |
+| Waymo | `data/moge3/align_depth/waymo` (2 Hz, all 1000 segments) | Mask2Former in progress (`data/m2f/waymo`) | trains on its geo split since 2026-11-21 |
+| HRDX | none here | — | held-out rig, scored by mapnn's zero-shot diag |
 
-Depth labels live in `../DVGT/public_datasets/data_annotation_moge3/align_depth`. Use DVGT's filtered
-lists in `../DVGT/data_annotation/meta/moge3_vitl/moge_pred_filter_parquet`, because label quality
+Depth labels live in `data/moge3/align_depth` (copied from DVGT 2026-11-21; code in `tools/moge_labels/`).
+Use DVGT's filtered lists in `data/moge3/meta/moge_pred_filter_parquet`, because label quality
 varies by dataset.
 
 ## Image preparation must match `CameraSubsampler`

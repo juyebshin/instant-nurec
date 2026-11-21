@@ -73,3 +73,6 @@ debug*
 .ripgreprc
 .zprofile
 .zshrc
+
+# Datasets and labels (symlinks + the MoGe-3 depth copy); layout in tools/moge_labels/README.md
+/data/

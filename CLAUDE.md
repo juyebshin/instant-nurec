@@ -8,7 +8,7 @@ NVIDIA Instant NuRec: a feed-forward model that turns a calibrated multi-camera 
 3D Gaussian Splatting scene in one forward pass. It outputs a static Gaussian layer, dynamic layers,
 a sky cubemap and per-camera ISP affines. It is a DAv3 ViT encoder with per-image camera tokens and
 DPT decoders. This checkout is on branch **`pmt-finetune`**. The branch adds fine-tuning on non-NCore
-logs (AV2 / nuScenes through PseudoMapTrainer index pickles) and an 8-class semantic head.
+logs (AV2 / nuScenes / Waymo through PseudoMapTrainer index pickles) and an 8-class semantic head.
 **Read `docs/PMT_FINETUNE.md` first.** It holds the branch diff, the AV2 pilot results, the known
 issues and the multi-rig plan that is the next step.
 
@@ -170,7 +170,7 @@ Launch anything longer than ~2 minutes detached (`setsid nohup … > log 2>&1 &`
 | `../PseudoMapTrainer/RoGS/output/inurec_finetune/` | indexes, runs and checkpoints of the fine-tune |
 | `../mapnn/tools/analysis_tools/inurec_{zeroshot_diag,zeroshot_run,render_eval}.py` | geometry vs LiDAR per rig; next-frame render eval |
 | `../mapnn/docs/instant-nurec-backbone-study.md` | zero-shot study of this model as a geometry backbone |
-| `../DVGT/public_datasets/data_annotation_moge3/` | LiDAR-aligned MoGe-3 depth labels shared with DVGT |
+| `../DVGT/` | made the LiDAR-aligned MoGe-3 depth labels. Since 2026-11-21 they are copied to `data/moge3/` and its labeling code to `tools/moge_labels/` (README there); this repo no longer reads DVGT. The converted Waymo (`waymo_ns`) moved the same day to `/home1/irteam/data/waymo_ns` (`data/waymo_ns` here); DVGT keeps a symlink to it |
 
 **Style.** ruff, line length 120, isort settings in `pyproject.toml`. Upstream files carry an SPDX
 header. Upstream contributions need DCO sign-off (`git commit -s`, `CONTRIBUTING.md`). `.claude/`
