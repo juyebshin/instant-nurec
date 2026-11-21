@@ -1,0 +1,88 @@
+# SMOKE of the Waymo path of pmt_geo_av2_nusc_waymo.yaml at its full contract (T=8, 504x280 context and
+# supervision): one Waymo geo-train segment, batch 1, 2 steps + val. Checks that undistorted 5-camera Waymo
+# batches without masks train with finite losses (semantic loss skipped) and saves; peak memory and s/step.
+# Not a quality result. AV2 and nuScenes batches are covered by pmt_av2_nusc_smoke.yaml.
+seed: 38
+out_dir: checkpoints/training     # relative to the repo root (scripts/train_pmt_av2_nusc.sh cds there)
+phase: render
+reference_profile: full-model-front-v1
+
+logger:
+  name: csv
+  run_name: pmt-geo-waymo-smoke
+
+_sampling: &sampling
+  camera_subsampler: {frame_width: 504, frame_height: 280}
+  n_frames_per_sample: 8
+  frame_gap_us: 500000
+  supervision_frame_batch:
+    n_frames_per_camera: 1
+    prepend_timestamps_us: 100000
+    append_timestamps_us: 100000
+    sample_strategy: random
+    camera_subsampler: {frame_width: 504, frame_height: 280}
+    include_context_frames: true
+_waymo_cams: &waymo_cams [FRONT, FRONT_LEFT, FRONT_RIGHT, SIDE_LEFT, SIDE_RIGHT]
+
+dataset:
+  train:
+    <<: *sampling
+    index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/geo/waymo/train/10017090168044687777_6380_000_6400_000.pkl]
+    camera_ids: *waymo_cams
+    n_samples_per_sequence: 2
+  val:
+    <<: *sampling
+    index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/geo/waymo/train/10017090168044687777_6380_000_6400_000.pkl]
+    camera_ids: *waymo_cams
+    n_samples_per_sequence: 1
+
+model:
+  freeze_encoder: false
+  init_weights_paths:
+    full: /home1/irteam/workspace/instant-nurec/checkpoints/pth/instant_nurec_pa_multiview_1.1.0.pth
+  init_full_keep_heads: true
+  post_processing:
+    enabled: true
+    optimization_start_global_step: 1000
+  decoder:
+    name: dpt-decoder
+    n_semantic_classes: 8
+
+system:
+  max_epochs: 1
+  train_batch_size: 1
+  val_batch_size: 1
+  train_num_workers: 4
+  val_num_workers: 2
+  precision: bf16-mixed
+  accelerator: gpu
+  devices: 1
+  num_nodes: 1
+  strategy: auto
+  enable_render_global_step: 0
+  limit_train_batches: 2
+  limit_val_batches: 1
+  log_every_n_steps: 1
+  save_every_n_train_steps: 2
+  checkpoint_monitor: val/psnr
+  checkpoint_mode: max
+  save_top_k: 2
+  optimizer:
+    lr: 2.0e-5                   # 1/5 of the upstream render-phase lr: the encoder is unfrozen
+  scheduler:
+    warmup_steps: 500
+
+# As pmt_geo_av2_nusc_waymo.yaml. A render-phase loss block must list every weight (omitted ones become 0).
+loss:
+  primitive_sky_cubemap: 0.01
+  primitive_rgb: 0.1
+  primitive_distance: 1.0
+  primitive_distance_gradient: 1.0
+  primitive_semantics: 0.1
+  primitive_normal: 0.2
+  primitive_velocity: 1.0
+  rgb: 1.0
+  lpips: 0.2
+  distance: 0.1
+  background: 2.0
+  background_requires_semantics: true

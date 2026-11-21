@@ -90,6 +90,9 @@ class TrainingLossConfig(BaseConfigSchema):
     lpips: float = Field(default=0.0, ge=0)
     distance: float = Field(default=0.0, ge=0)
     background: float = Field(default=0.0, ge=0)
+    # Score the background loss only on pixels with a semantic mask (VALID_SEMANTIC). Needed when a
+    # dataset lacks masks (e.g. Waymo in the PMT mixture before its M2F masks): else its sky is foreground.
+    background_requires_semantics: bool = False
     distance_min_m: float = Field(default=0.1, gt=0)
     primitive_distance_max_m: float = Field(default=300.0, gt=0)
     primitive_distance_gradient_max_m: float = Field(default=50.0, gt=0)

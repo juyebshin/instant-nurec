@@ -208,7 +208,7 @@ class NCoreInstantNuRecDatasetConfig(BaseConfigSchema):
 
 
 class PMTIndexDatasetConfig(BaseConfigSchema):
-    """Non-NCore logs (AV2 / nuScenes) from per-log index pickles written by
+    """Non-NCore logs (AV2 / nuScenes / Waymo) from per-log index pickles written by
     PseudoMapTrainer ``RoGS/scripts/inurec_finetune_index.py``.
 
     Context: ``n_frames_per_sample`` frames of every camera, ``frame_gap_us`` apart on the
@@ -232,7 +232,7 @@ class PMTIndexDatasetConfig(BaseConfigSchema):
 
 class NCoreMixtureComponentConfig(BaseConfigSchema):
     sample_ratio: float = Field(default=1.0, ge=0.0)
-    config: NCoreInstantNuRecDatasetConfig | PMTIndexDatasetConfig  # PMT: e.g. AV2 + nuScenes, own camera sets
+    config: NCoreInstantNuRecDatasetConfig | PMTIndexDatasetConfig  # PMT: e.g. AV2 + nuScenes + Waymo, own camera sets
 
 
 class NCoreMixtureDatasetConfig(BaseConfigSchema):

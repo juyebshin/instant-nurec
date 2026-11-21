@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Training dataset for non-NCore logs (AV2 / nuScenes) from per-log index pickles.
+"""Training dataset for non-NCore logs (AV2 / nuScenes / Waymo) from per-log index pickles.
 
 The index is written by PseudoMapTrainer ``RoGS/scripts/inurec_finetune_index.py``
 (that env has the AV2 / nuScenes devkits; this one does not)::
@@ -9,6 +9,11 @@ The index is written by PseudoMapTrainer ``RoGS/scripts/inurec_finetune_index.py
     rig: {"timestamps_us": (N,) int64, "T_ego_world": (N, 4, 4) float64}  # one pose per image timestamp
     frames: {name: [{"t_us": int, "img": str, "seg": str | None, "depth": str | None}, ...]}  # sorted by t_us
     semantic_lut: (256,) uint8   # segmentation id -> KelvinSemanticClass, 255 = ignore
+
+A camera may also carry (Waymo does):
+
+    distortion: {"K", "D" (OpenCV k1 k2 p1 p2 k3), "wh"}  # image / seg files are raw; undistorted onto K / wh
+    depth_grid: {"K", "wh"}  # the depth files' own pinhole grid of the same camera; resampled onto K / wh
 
 Depth files are DVGT/MoGe log-encoded uint16 PNGs of camera z-depth (``near`` / ``far`` in
 the PNG text; 0 = unknown, 65535 = inf); they are converted to ray distance here.
@@ -20,6 +25,7 @@ to the learned-motion dynamic layer).
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import pickle
 from collections import OrderedDict
@@ -81,6 +87,33 @@ def pinhole_parameters(K: np.ndarray, wh: tuple[int, int]) -> ncore.data.OpenCVP
         tangential_coeffs=np.zeros(2, dtype=np.float32),
         thin_prism_coeffs=np.zeros(4, dtype=np.float32),
     )
+
+
+@functools.lru_cache(maxsize=10)  # one sample's cameras; ~15 MB per 1920x1280 map pair
+def _undistort_maps(K_raw: tuple, D: tuple, K: tuple, wh: tuple[int, int]):
+    as_K = lambda k: np.array(k, np.float64).reshape(3, 3)  # noqa: E731
+    return cv2.initUndistortRectifyMap(as_K(K_raw), np.array(D, np.float64), None, as_K(K), wh, cv2.CV_16SC2)
+
+
+def undistort_image(image: np.ndarray, distortion: dict, K: np.ndarray, wh: tuple[int, int],
+                    interpolation: int = cv2.INTER_LINEAR, border_value: int = 0) -> np.ndarray:
+    """Raw image of the distorted camera ``distortion`` -> the pinhole grid ``K`` / ``wh``.
+
+    Use ``cv2.INTER_NEAREST`` for label maps. An image at another size than the raw ``wh`` (e.g. a
+    downscaled mask) is first resized to it with the same interpolation."""
+    raw_wh = tuple(distortion["wh"])
+    if image.shape[1::-1] != raw_wh:
+        image = cv2.resize(image, raw_wh, interpolation=interpolation)
+    maps = _undistort_maps(*(tuple(np.ravel(x).tolist()) for x in (distortion["K"], distortion["D"], K)), tuple(wh))
+    return cv2.remap(image, *maps, interpolation, borderMode=cv2.BORDER_CONSTANT, borderValue=border_value)
+
+
+def resample_depth_grid(depth: np.ndarray, depth_K: np.ndarray, K: np.ndarray, wh: tuple[int, int]) -> np.ndarray:
+    """z-depth on one pinhole grid -> another grid of the same camera (nearest; 0 outside)."""
+    ax, ay = depth_K[0, 0] / K[0, 0], depth_K[1, 1] / K[1, 1]
+    target_to_source = np.array([[ax, 0, depth_K[0, 2] - ax * K[0, 2]], [0, ay, depth_K[1, 2] - ay * K[1, 2]]])
+    return cv2.warpAffine(depth, target_to_source, tuple(wh), flags=cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP,
+                          borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
 
 class PMTIndexDataset(BaseInstantNuRecIndexableDataset[InstantNuRecDataBatch]):
@@ -171,13 +204,20 @@ class PMTIndexDataset(BaseInstantNuRecIndexableDataset[InstantNuRecDataBatch]):
 
     def _load_labels(self, index, cam: str, frame: dict, subsampler: CameraSubsampler) -> CameraFrameLabels:
         h, w = subsampler.frame_height, subsampler.frame_width
-        image = cv2.cvtColor(cv2.imread(frame["img"]), cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        meta = index["cameras"][cam]
+        K, wh = np.asarray(meta["K"], np.float64), tuple(meta["wh"])
+        image = cv2.imread(frame["img"])
+        if "distortion" in meta:
+            image = undistort_image(image, meta["distortion"], K, wh)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         labels = CameraFrameLabels(rgb=torch.from_numpy(subsampler.apply_frame_data(image))[None])
         flags = torch.full((h, w), int(RayFlags.RGB_LABEL), dtype=torch.int32)
         sky_full = None
         if self.config.semantic_segmentation:
             if frame["seg"] is not None:
                 classes_full = index["semantic_lut"][cv2.imread(frame["seg"], cv2.IMREAD_UNCHANGED)]
+                if "distortion" in meta:  # masks predicted on the raw, distorted image
+                    classes_full = undistort_image(classes_full, meta["distortion"], K, wh, cv2.INTER_NEAREST, IGNORE)
                 sky_full = classes_full == int(C.SKY)
                 classes = torch.from_numpy(subsampler.apply_frame_data(classes_full))
                 flags |= int(RayFlags.VALID_SEMANTIC)
@@ -191,14 +231,15 @@ class PMTIndexDataset(BaseInstantNuRecIndexableDataset[InstantNuRecDataBatch]):
                 classes = torch.full((h, w), IGNORE, dtype=torch.uint8)
             labels.semantic_class = classes[None, ..., None]
         if self.config.depth and frame["depth"] is not None:
-            meta = index["cameras"][cam]
             depth = read_log_depth(frame["depth"])
+            if "depth_grid" in meta:
+                depth = resample_depth_grid(depth, np.asarray(meta["depth_grid"]["K"], np.float64), K, wh)
             if sky_full is not None:  # as the NCore loader: no depth on sky
                 if sky_full.shape != depth.shape:  # e.g. nuScenes MoGe depth is a downscaled image
                     sky_full = cv2.resize(sky_full.astype(np.uint8), depth.shape[::-1],
                                           interpolation=cv2.INTER_NEAREST).astype(bool)
                 depth[sky_full] = 0.0
-            distance = z_to_ray_distance(depth, np.asarray(meta["K"], np.float64), tuple(meta["wh"]))
+            distance = z_to_ray_distance(depth, K, wh)
             labels.metric_distance = torch.from_numpy(subsampler.apply_depth_data(distance))[None, ..., None]
         labels.flags = flags[None, ..., None]
         return labels

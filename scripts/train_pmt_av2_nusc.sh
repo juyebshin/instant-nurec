@@ -6,6 +6,8 @@
 #
 #   GPUS=0,1,2,3 scripts/train_pmt_av2_nusc.sh                                 # foreground
 #   setsid nohup scripts/train_pmt_av2_nusc.sh > /dev/null 2>&1 &         # detached (shared machine)
+#   CONFIG=configs/training/pmt_geo_av2_nusc_waymo.yaml RUN_ID=pmt-geo-av2-nusc-waymo-2ep \
+#     setsid nohup scripts/train_pmt_av2_nusc.sh > /dev/null 2>&1 &       # + Waymo, geo splits
 #
 # Self-contained: needs only the sjy-inurec env (with its conda nvcc 12.8 + gcc 11.4) and this repo.
 # Checkpoints go to checkpoints/training/<RUN_ID>/ (config out_dir, relative to the repo root), the

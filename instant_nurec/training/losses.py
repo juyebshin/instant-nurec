@@ -162,11 +162,14 @@ class TrainingLosses(torch.nn.Module):
             semantic_logits = _required(pack.context_semantic_logits, "model context semantic logits")
             _required(labels.flags, "context semantic flags")
             targets = _semantic_targets(labels)
-            values["primitive_semantics"] = F.cross_entropy(
-                semantic_logits.moveaxis(-1, 1),
-                targets,
-                ignore_index=SEMANTIC_IGNORE_INDEX,
-            )
+            if (targets != SEMANTIC_IGNORE_INDEX).any():
+                values["primitive_semantics"] = F.cross_entropy(
+                    semantic_logits.moveaxis(-1, 1),
+                    targets,
+                    ignore_index=SEMANTIC_IGNORE_INDEX,
+                )
+            else:  # e.g. a batch from a dataset without masks; cross_entropy would return NaN
+                skipped.append("primitive_semantics")
 
         if self.config.primitive_normal > 0 and pack.context_world_normal is not None and labels.normals is not None:
             valid = labels.get_mask_flags_all(RayFlags.VALID_NORMAL)
@@ -294,6 +297,9 @@ class TrainingLosses(torch.nn.Module):
             bg_valid = labels.get_mask_flags_none(
                 RayFlags.INVALID | RayFlags.HARMONIZED | RayFlags.SYNTHETIC
             )
+            if self.config.background_requires_semantics:
+                # Without a mask, "not sky" is unknown rather than foreground.
+                bg_valid &= labels.get_mask_flags_all(RayFlags.VALID_SEMANTIC)
             if bg_valid.any():
                 foreground_target = (~sky).float()
                 values["background"] = _masked_mean(
