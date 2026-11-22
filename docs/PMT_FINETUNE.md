@@ -20,6 +20,7 @@ rigs, whose Gaussians initialise RoGS road reconstruction in PseudoMapTrainer (P
 | `configs/training/pmt_av2_smoke.yaml`, `pmt_av2_pilot.yaml` (new) | One-step smoke config and the 2-epoch AV2 pilot. |
 | `configs/training/pmt_av2_nusc.yaml`, `pmt_av2_nusc_smoke.yaml` (new) | AV2 + nuScenes fine-tune with 504×280 supervision, and its smoke at the same contract. |
 | `configs/training/pmt_geo_av2_nusc_waymo.yaml`, `pmt_geo_waymo_smoke.yaml` (new) | AV2 + nuScenes + Waymo on the geo splits PMT and mapnn use (§3), and a smoke of the Waymo path. |
+| `config_schema/dataset.py`, `datasets/pmt_index.py` | `PMTIndexDatasetConfig.semantic_remap` (default empty): class → class, composed onto the index's 8-class `semantic_lut`. `{5: 3, 6: 3, 7: 0}` trains the released 5-class head (2026-11-22). |
 | `datasets/pmt_index.py`, `training/losses.py`, `config_schema/train.py` | Index cameras with lens `distortion` (undistorted on load) and a separate `depth_grid`; the semantic loss is skipped, not NaN, on a batch with no mask; `loss.background_requires_semantics` (default off). |
 
 **Index pickles.** These are written by PMT `RoGS/scripts/inurec_finetune_index.py`, which runs
@@ -148,7 +149,9 @@ median height error vs LiDAR. Log 7fab is in no PMT split; 02678d04 and 0b5142c1
 
 - **Height:** step 9000 reaches the MoGe-label level.
 - **Coverage:** IoU is 2–4 points below step 1000. The road pixel share is unchanged, so the loss
-  is in where road points land, not in the semantics. Cause not found.
+  is in where road points land, not in the semantics. Likely cause (2026-11-22, §3 "Class BEV and boundary
+  in the road test"): the GT includes LiDAR boundary-labelled points. Against GT road surface only, step
+  9000 beats step 1000 on all 3 logs.
 
 **Next-frame render** (mapnn `tools/analysis_tools/inurec_render_eval.py --ckpt`).
 - Data: 100 AV2 samples from 150 logs, none of them among the 695 PMT logs.
@@ -293,6 +296,82 @@ its `val/psnr` is not comparable to the pilot's.
 - Resume edge case: a checkpoint written on an epoch's last batch resumes into the next epoch with the
   batch cursor still at the end, and that epoch trains no steps (`training/data.py` `SkipBatchSampler`).
   Not hit when the epoch length is not a multiple of `save_every_n_train_steps`.
+- **Result (run `pmt-av2-nusc-2ep`, 2026-11-20 16:59 → 11-21 23:14, GPUs 0–3, instant-nurec `24f1a8b`).**
+  Both epochs completed (2,454 steps, ~45 s/step, about 19.6k samples). The final step is saved
+  (`checkpoints/training/pmt-av2-nusc-2ep/checkpoints/epoch=epoch=02-step=step=2454.ckpt`). `val/psnr`:
+  20.85 after epoch 1, 21.56 after epoch 2. Evals on step 2454, with the step-9000 protocol and the same
+  scripts (unchanged since; PMT `9e6eee3`, mapnn `ede8699`; sha256 in
+  `RoGS/output/inurec_road/av2nusc_2ep_run.log`). Single seed, three road-test logs. **Confounded vs the
+  pilot:** data mix, batch 8 vs 1, and steps all differ.
+
+  | road test | dz | median \|dz\| | IoU | IoU ≤ 15 m |
+  | --- | --- | --- | --- | --- |
+  | 7fab: step 9000 → AV2+nuS | −0.018 → −0.026 | 0.025 → 0.031 | 0.584 → 0.578 | 0.505 → 0.500 |
+  | 02678d04 | +0.008 → −0.005 | 0.027 → 0.031 | 0.488 → 0.486 | 0.504 → 0.496 |
+  | 0b5142c1 | +0.029 → −0.006 | 0.039 → 0.032 | 0.652 → 0.670 | 0.506 → 0.517 |
+
+  | next-frame render, static (PSNR / SSIM / LPIPS) | step 9000 | AV2+nuS 2454 |
+  | --- | --- | --- |
+  | rendered next frame | 19.43 / 0.624 / 0.357 | 18.75 / 0.582 / 0.308 |
+  | copy previous frame ("hold") | 17.14 / 0.457 / 0.335 | 17.13 / 0.456 / 0.335 |
+  | re-render newest input | 22.41 / 0.725 / 0.286 | 22.19 / 0.736 / 0.209 |
+
+  - **Road height:** stays at the MoGe-label level.
+  - **Road IoU:** within about a point of step 9000, and still below step 1000. The open IoU drop is
+    unchanged.
+  - **Render:** the rendered next frame loses 0.7 dB PSNR, but its LPIPS now beats hold (0.308 vs 0.335);
+    at step 9000 LPIPS still favoured hold.
+  - **Semantic share on 7fab:** CROSSWALK is argmax on 0.6% of pixels, against 0.1% at step 9000.
+
+  Outputs: `RoGS/output/inurec_road/av2nusc_2ep/{vis,render}` and `labelcheck/<log>/av2nusc_2ep`.
+- **Class BEV and boundary in the road test (2026-11-22).** Scripts `RoGS/output/inurec_road/cls_bev_run.sh` and
+  `cls_bev_lidar_run.sh`.
+  - **What the scripts save now.** `inurec_road_run.py` also keeps BOUNDARY Gaussians (8-class head), with
+    a per-Gaussian `cls`.
+  - **Visualisations.** The RGB BEV shows road surface plus boundary. `vis --rogs-dir <RoGS scene dir>`
+    writes `road_bev_cls_*.png`:
+    - the Gaussians' road / lane / crosswalk / boundary (opacity-weighted vote, RoGS colours) on RoGS's
+      own BEV grid (0.05 m, trajectory ±7 m);
+    - below it, that RoGS run's `images/final/bev_label.png` and its LiDAR road-point label render
+      `road_point/bev_label.png`;
+    - per-class IoU vs the LiDAR labels in `road_bev_cls_stats.json`. The script checks that both
+      grids match.
+  - **Frames.** The road-test world is not RoGS's AV2 world: it is anchored at the first LiDAR sweep,
+    RoGS at the first `ring_rear_left` frame, 0.03–0.55 m apart on these logs. The class BEV corrects for
+    this.
+  - **Established metrics unchanged.** `all` and `range<=15m` (road surface vs every GT point) are
+    bit-identical to before for zero-shot, MoGe, step 1000, step 9000 and AV2+nuS on the 3 logs.
+  - **Likely cause of the step-1000 → 9000 IoU drop.** The LiDAR road GT includes boundary-labelled
+    points (29% / 45% / 29% of points on 7fab / 02678d04 / 0b5142c1), and the established IoU scores
+    road surface against all of them. Step 1000 labels more curb and sidewalk as road. With that
+    mismatch removed, step 9000 is ahead on every log. Single seed, 3 logs.
+
+    | IoU (7fab / 02678d04 / 0b5142c1) | established | surface vs GT surface | surface+boundary vs all GT |
+    | --- | --- | --- | --- |
+    | step 1000 | 0.608 / 0.503 / 0.689 | 0.739 / 0.579 / 0.794 | 0.756 / 0.623 / 0.676 |
+    | step 9000 | 0.584 / 0.488 / 0.652 | 0.786 / 0.605 / 0.833 | 0.780 / 0.637 / 0.688 |
+    | AV2+nuS 2454 | 0.578 / 0.486 / 0.670 | 0.788 / 0.619 / 0.824 | 0.779 / 0.633 / 0.672 |
+    | MoGe-3 labels | – / 0.500 / 0.665 | – / 0.620 / 0.839 | – |
+
+  - **Class IoU vs the LiDAR road-point labels on RoGS's grid.** Road / lane / crosswalk / boundary, on
+    7fab:
+
+    | 7fab | road | lane | crosswalk | boundary |
+    | --- | --- | --- | --- | --- |
+    | step 1000 | 0.63 | 0.00 | 0.00 | 0.52 |
+    | step 9000 | 0.67 | 0.47 | 0.00 | 0.58 |
+    | AV2+nuS | 0.67 | 0.32 | 0.09 | 0.57 |
+    | RoGS `single_trip_av2` | 0.69 | 0.51 | 0.69 | 0.33 |
+
+    Comparing the two:
+    - RoGS is ahead on lane and crosswalk.
+    - The Gaussians are ahead on boundary.
+    - Road is within 0.03.
+
+    Two caveats:
+    - The Gaussians are rasterised as point centres, which leaves far-range speckle, while RoGS is
+      splatted. This counts against the Gaussians.
+    - RoGS is a per-scene optimisation over the whole log.
 
 **AV2 + nuScenes + Waymo on geo splits (2026-11-21, `pmt_geo_av2_nusc_waymo.yaml`).** The user chose to
 train on Waymo, on the geographically disjoint splits PMT and mapnn train and evaluate on, so numbers are
@@ -317,6 +396,24 @@ comparable with theirs. Same recipe as `pmt_av2_nusc.yaml` except: geo splits; W
   steps 0 / 1 (AV2 + nuScenes smoke: total loss 6.7–8.0), in line with the released model's zero-shot
   Waymo range ratio of 0.47 (§3). Peak memory and s/step not measured (GPU shared). The full 3-dataset
   config on 4 GPUs has not been run.
+- **5-class head (decided 2026-11-22).** The 8-class runs barely predict CROSSWALK (class IoU vs LiDAR
+  0.00–0.09 on 7fab, against RoGS's 0.69), so this run keeps the released 5-class head (OTHERS, EGO, SKY,
+  ROAD, MOVABLE) unchanged, with no widening. The index pickles stay 8-class; `semantic_remap:
+  {5: 3, 6: 3, 7: 0}` folds LANE and CROSSWALK into ROAD (paint is road surface) and BOUNDARY (curb,
+  sidewalk, median, traffic island, …) into OTHERS. ROAD_SEMANTIC flags are unchanged by this, because
+  BOUNDARY was never road surface. Map classes are to be assigned after the fact, either by projecting the
+  Gaussians into the M2F masks and voting, or by RoGS optimisation. Neither is built yet. The road test on
+  this model saves ROAD only (`inurec_road_run.py` keeps BOUNDARY for 8 classes only), so compare it on the
+  road-surface metrics.
+  - Verified on CPU: on 2 AV2 and 2 nuScenes geo-val items, the remapped labels contain only classes 0–4.
+    They equal the 8-class labels with the fold applied, pixel for pixel (ROAD share = old ROAD + LANE +
+    CROSSWALK share).
+  - Smoke (`pmt_av2_nusc_smoke.yaml` with the 5-class head and remap, batch 1, GPU 1 shared): released
+    head loaded with 0 unexpected keys. 4 steps + val, every loss finite (total 6.7–8.0, the 8-class smoke's
+    range), `primitive_semantics` 0.17–0.27. Checkpoints at steps 2 and 4 and `last.ckpt` written; val
+    PSNR 14.48. Only `primitive_velocity` skipped. Smoke only, no eval.
+  - Comparison: against `pmt-av2-nusc-2ep` this run changes the data and splits as well as the head, so
+    the head's effect cannot be read from it alone.
 - **Licence.** Waymo Open Dataset terms now apply to these checkpoints; they are not yet recorded in
   mapnn `docs/data-provenance.md` ("Other datasets").
 
@@ -329,6 +426,7 @@ comparable with theirs. Same recipe as `pmt_av2_nusc.yaml` except: geo splits; W
 **Open decisions.**
 - Held-out rigs: decided 2026-11-21 for `pmt_geo_av2_nusc_waymo.yaml`: Waymo in training (geo split),
   HRDX held out.
-- Keep the 8-class semantic head or train geometry only.
+- Keep the 8-class semantic head: decided 2026-11-22. Train the released 5-class head, and assign map
+  classes after the fact.
 - Initialise from step 9000 or from the released weights.
 - GPU budget.

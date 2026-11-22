@@ -28,9 +28,9 @@ Be accurate about this in every plan and report. Sources: `docs/PMT_FINETUNE.md`
 | Released profiles `pa-front`, `pa-multiview` (1/3/5 cameras, 504×280, T=18), `pq-front` | implemented (upstream) |
 | Two-phase dense front-camera training | implemented (upstream) |
 | Upstream random 1/3/5-camera, 12/16/18-frame multiview curriculum | **not in this repo** |
-| Fine-tune on non-NCore logs (`PMTIndexDataset`; the exporter handles AV2, nuScenes and Waymo) | implemented. AV2 pilot done: 2 epochs, val PSNR 22.99, but `last.ckpt` holds step 9000 of 9820. AV2 + nuScenes (`pmt_av2_nusc.yaml`) launched 2026-11-20. AV2 + nuScenes + Waymo on geo splits (`pmt_geo_av2_nusc_waymo.yaml`, 2026-11-21): indexes built, Waymo path smoke-tested only; **not trained yet.** |
-| 8-class semantic head (+ LANE, CROSSWALK, BOUNDARY) | implemented. At step 9000, LANE is argmax on 0.4–1.1% of pixels and CROSSWALK on ≤ 0.1%. BOUNDARY not reported. |
-| HD map: ROAD Gaussians vs LiDAR road (road test, 3 AV2 logs) | measured. Height reaches the MoGe-label level (median \|dz\| 0.025–0.039 m). **IoU is 2–4 points below step 1000, cause not found.** |
+| Fine-tune on non-NCore logs (`PMTIndexDataset`; the exporter handles AV2, nuScenes and Waymo) | implemented. AV2 pilot done: 2 epochs, val PSNR 22.99, but `last.ckpt` holds step 9000 of 9820. AV2 + nuScenes (`pmt_av2_nusc.yaml`) done 2026-11-21: 2 epochs, final step 2454 saved, val PSNR 21.56; road test level with step 9000, next-frame render −0.7 dB PSNR but LPIPS now beats hold (confounded vs the pilot). AV2 + nuScenes + Waymo on geo splits (`pmt_geo_av2_nusc_waymo.yaml`, 2026-11-21): indexes built, Waymo path smoke-tested only; 5-class head since 2026-11-22; **not trained yet.** |
+| 8-class semantic head (+ LANE, CROSSWALK, BOUNDARY) | implemented, dropped for the next run (2026-11-22). Class IoU vs LiDAR on 7fab: CROSSWALK 0.00–0.09 (RoGS 0.69). At step 9000, LANE is argmax on 0.4–1.1% of pixels and CROSSWALK on ≤ 0.1%. BOUNDARY not reported. |
+| HD map: ROAD Gaussians vs LiDAR road (road test, 3 AV2 logs) | measured. Height reaches the MoGe-label level (median \|dz\| 0.025–0.039 m). IoU is 2–4 points below step 1000. Likely cause (2026-11-22): the LiDAR GT includes boundary points. Against GT road surface, step 9000 is ahead on all 3 logs (single seed). |
 | RoGS training initialised from these Gaussians | **not reported here.** Do not claim it. |
 | Multi-rig geometry | **planned** (`PMT_FINETUNE.md` §3). Zero-shot range ratio is 0.47 (Waymo) to 1.01 (HRDX). Waymo moved into training (geo split) 2026-11-21; HRDX is the held-out rig. |
 | Index export for DDAD / KITTI / OpenScene | **not implemented** |
@@ -60,7 +60,8 @@ geometry, and that geometry does not yet transfer across rigs.
 
 Open decisions belong to the user. Do not settle them inside a code change:
 - held-out rigs (decided 2026-11-21: Waymo in training on its geo split, HRDX held out);
-- keeping the 8-class head;
+- keeping the 8-class head (decided 2026-11-22: the next run trains the released 5-class head; map classes
+  are assigned after the fact by projection + voting or RoGS optimisation, which is not built yet);
 - initialising from step 9000 or from the released weights;
 - the GPU budget.
 

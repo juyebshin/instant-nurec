@@ -227,6 +227,11 @@ class PMTIndexDatasetConfig(BaseConfigSchema):
     )
     depth: bool = True
     semantic_segmentation: bool = True
+    semantic_remap: dict[int, int] = Field(
+        default_factory=dict,
+        description="Class -> class, applied after the index's semantic_lut (unlisted classes and 255 unchanged). "
+        "{5: 3, 6: 3, 7: 0} trains the released 5-class head: LANE, CROSSWALK -> ROAD, BOUNDARY -> OTHERS",
+    )
     supervision_frame_batch: SupervisionFrameBatchConfig = Field(default_factory=SupervisionFrameBatchConfig)
 
 

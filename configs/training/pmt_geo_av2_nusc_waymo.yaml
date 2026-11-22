@@ -1,8 +1,11 @@
 # Joint fine-tune of the released pa-multiview model on AV2 + nuScenes + Waymo, on the geographically
 # disjoint "near" splits that PseudoMapTrainer (AV2, nuScenes) and mapnn (all three) train and evaluate on.
 # Same recipe as pmt_av2_nusc.yaml (4 GPUs x batch 2, lr 5.7e-5, 504x280 context and supervision,
-# released init, 8-class head) except: (1) geo splits instead of the official ones; (2) Waymo added
-# (5 cameras); (3) background_requires_semantics, because Waymo frames may lack masks.
+# released init) except: (1) geo splits instead of the official ones; (2) Waymo added (5 cameras);
+# (3) background_requires_semantics, because Waymo frames may lack masks; (4) the released 5-class head
+# (OTHERS, EGO, SKY, ROAD, MOVABLE) instead of the 8-class one (2026-11-22): the 8-class runs barely
+# predict CROSSWALK, so LANE and CROSSWALK labels fold into ROAD and BOUNDARY into OTHERS (semantic_remap),
+# and map classes are assigned after the fact (projection + voting, or RoGS optimisation).
 #
 # Index tree: PseudoMapTrainer RoGS/output/inurec_finetune/index/geo, built by logs/export_geo.sh.
 # Train: 695 AV2 x 5 + 554 nuScenes x 6 + 700 Waymo x 5 = 10299 samples (about a third each).
@@ -29,6 +32,7 @@ _sampling: &sampling
   camera_subsampler: {frame_width: 504, frame_height: 280}
   n_frames_per_sample: 8
   frame_gap_us: 500000
+  semantic_remap: {5: 3, 6: 3, 7: 0}   # index LUT is 8-class: LANE, CROSSWALK -> ROAD; BOUNDARY -> OTHERS
   supervision_frame_batch:
     n_frames_per_camera: 1
     prepend_timestamps_us: 100000
@@ -96,7 +100,7 @@ model:
     optimization_start_global_step: 1000
   decoder:
     name: dpt-decoder
-    n_semantic_classes: 8
+    n_semantic_classes: 5          # released head as is; no widening
 
 system:
   max_epochs: 2                  # 10299 samples / epoch = 5150 one-dataset batches = 1288 steps on 4 GPUs

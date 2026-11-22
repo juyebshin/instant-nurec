@@ -10,6 +10,8 @@ The index is written by PseudoMapTrainer ``RoGS/scripts/inurec_finetune_index.py
     frames: {name: [{"t_us": int, "img": str, "seg": str | None, "depth": str | None}, ...]}  # sorted by t_us
     semantic_lut: (256,) uint8   # segmentation id -> KelvinSemanticClass, 255 = ignore
 
+The exporter's LUT is 8-class; ``semantic_remap`` in the config folds it for a smaller head.
+
 A camera may also carry (Waymo does):
 
     distortion: {"K", "D" (OpenCV k1 k2 p1 p2 k3), "wh"}  # image / seg files are raw; undistorted onto K / wh
@@ -123,6 +125,9 @@ class PMTIndexDataset(BaseInstantNuRecIndexableDataset[InstantNuRecDataBatch]):
         self._retry_on_error = retry_on_error
         self._rng_epoch = -1
         self._epoch = 0
+        self._remap = np.arange(256, dtype=np.uint8)  # composed onto each index's semantic_lut
+        for old, new in config.semantic_remap.items():
+            self._remap[old] = new
         self.indexes = []
         paths = [str(q) for p in config.index_paths
                  for q in (sorted(Path(p).glob("*.pkl")) if Path(p).is_dir() else [Path(p)])]
@@ -215,7 +220,7 @@ class PMTIndexDataset(BaseInstantNuRecIndexableDataset[InstantNuRecDataBatch]):
         sky_full = None
         if self.config.semantic_segmentation:
             if frame["seg"] is not None:
-                classes_full = index["semantic_lut"][cv2.imread(frame["seg"], cv2.IMREAD_UNCHANGED)]
+                classes_full = self._remap[index["semantic_lut"]][cv2.imread(frame["seg"], cv2.IMREAD_UNCHANGED)]
                 if "distortion" in meta:  # masks predicted on the raw, distorted image
                     classes_full = undistort_image(classes_full, meta["distortion"], K, wh, cv2.INTER_NEAREST, IGNORE)
                 sky_full = classes_full == int(C.SKY)

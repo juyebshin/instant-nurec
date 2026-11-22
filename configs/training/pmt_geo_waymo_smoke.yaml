@@ -15,6 +15,7 @@ _sampling: &sampling
   camera_subsampler: {frame_width: 504, frame_height: 280}
   n_frames_per_sample: 8
   frame_gap_us: 500000
+  semantic_remap: {5: 3, 6: 3, 7: 0}   # as pmt_geo_av2_nusc_waymo.yaml: 5-class head
   supervision_frame_batch:
     n_frames_per_camera: 1
     prepend_timestamps_us: 100000
@@ -46,7 +47,7 @@ model:
     optimization_start_global_step: 1000
   decoder:
     name: dpt-decoder
-    n_semantic_classes: 8
+    n_semantic_classes: 5
 
 system:
   max_epochs: 1
