@@ -14,6 +14,7 @@ Render modes: rgb (Gaussians over the sky, through the chosen camera's ISP affin
 without sky, semantic class (the PLY's ``semantic_class`` from ``--index-path`` runs; otherwise only its road / sky
 masks), depth (ray distance) and opacity. Click a context-camera frustum to look through it: the view, time and
 ISP camera snap to that frame. Moving the camera renders at a reduced size and refines once the view rests.
+Frames go as JPEG only; "frustums behind geometry" adds the depth PNG (~20x the JPEG) to refined frames.
 """
 
 from __future__ import annotations
@@ -155,6 +156,7 @@ class Renderer:
         self.lock = threading.Lock()  # one render at a time on the GPU
         self.static_keep = torch.ones_like(scene.densities, dtype=torch.bool)
         self.show_movable = True  # the dynamic layer is MOVABLE; the class filter hides it with that class
+        self._cache_key, self._cache = None, None  # the Gaussian set of the last render (rebuilt on change only)
         self.palette = torch.zeros(256, 3, device=scene.positions.device)
         for c, rgb in PALETTE.items():
             self.palette[int(c)] = torch.tensor(rgb, dtype=torch.float32, device=self.palette.device) / 255.0
@@ -163,11 +165,38 @@ class Renderer:
         keep = torch.zeros(256, dtype=torch.bool, device=self.scene.semantic.device)
         keep[list(classes)] = True
         self.static_keep = keep[self.scene.semantic]
+        self._cache_key = None
+
+    def _gaussians(self, semantic: bool, t_us: int, dynamic: bool) -> tuple[torch.Tensor, ...]:
+        """The class-filtered static Gaussians plus the dynamic layer at ``t_us``; cached, since gathering
+        them (~10 M with OpenScene's dynamic layer) costs more than rasterising them."""
+        s = self.scene
+        dynamic = dynamic and s.dynamic is not None and self.show_movable
+        key = (semantic, t_us if dynamic else None, dynamic)
+        if key == self._cache_key:
+            return self._cache
+        keep = self.static_keep
+        means, quats, scales = s.positions[keep], s.rotations[keep], s.scales[keep]
+        opacities = s.densities[keep]
+        colors = self.palette[s.semantic[keep]] if semantic else s.rgb[keep]
+        if dynamic:
+            layer = s.dynamic.interpolate(t_us)
+            visible = torch.isfinite(layer.positions).all(-1) & (layer.densities[:, 0] > 1e-5)
+            means = torch.cat([means, layer.positions[visible]])
+            quats = torch.cat([quats, torch.nn.functional.normalize(layer.rotations[visible], dim=-1)])
+            scales = torch.cat([scales, layer.scales[visible]])
+            opacities = torch.cat([opacities, layer.densities[visible, 0]])
+            dyn_colors = (self.palette[int(KelvinSemanticClass.MOVABLE)].expand(int(visible.sum()), 3)
+                          if semantic else layer.rgb[visible])
+            colors = torch.cat([colors, dyn_colors])
+        self._cache_key, self._cache = key, (means, quats, scales, opacities, colors)
+        return self._cache
 
     @torch.inference_mode()
     def render(self, c2w: np.ndarray, K: np.ndarray, wh: tuple[int, int], *, mode: str, t_us: int,
-               affine_index: int, dynamic: bool, near: float) -> tuple[np.ndarray, np.ndarray]:
-        """OpenCV camera-to-world ``c2w`` and pinhole ``K`` at ``wh`` -> (uint8 RGB image, z-depth)."""
+               affine_index: int, dynamic: bool, near: float, with_depth: bool = True,
+               ) -> tuple[np.ndarray, np.ndarray | None]:
+        """OpenCV camera-to-world ``c2w`` and pinhole ``K`` at ``wh`` -> (uint8 RGB image, z-depth or None)."""
         s, (w, h) = self.scene, wh
         device = s.positions.device
         K = torch.as_tensor(K, dtype=torch.float32, device=device)
@@ -179,23 +208,8 @@ class Renderer:
         dirs = torch.nn.functional.normalize(dirs_cam @ c2w_t[:3, :3].T, dim=-1)
         rays = torch.cat([c2w_t[:3, 3].expand(h, w, 3), dirs], -1).contiguous()
 
-        keep = self.static_keep
-        means, quats, scales = s.positions[keep], s.rotations[keep], s.scales[keep]
-        opacities, colors = s.densities[keep], s.rgb[keep]
-        if mode == "semantic":
-            colors = self.palette[s.semantic[keep]]
-        if dynamic and s.dynamic is not None and self.show_movable:
-            layer = s.dynamic.interpolate(t_us)
-            visible = torch.isfinite(layer.positions).all(-1) & (layer.densities[:, 0] > 1e-5)
-            means = torch.cat([means, layer.positions[visible]])
-            quats = torch.cat([quats, torch.nn.functional.normalize(layer.rotations[visible], dim=-1)])
-            scales = torch.cat([scales, layer.scales[visible]])
-            opacities = torch.cat([opacities, layer.densities[visible, 0]])
-            dyn_colors = (self.palette[int(KelvinSemanticClass.MOVABLE)].expand(int(visible.sum()), 3)
-                          if mode == "semantic" else layer.rgb[visible])
-            colors = torch.cat([colors, dyn_colors])
-
         with self.lock:
+            means, quats, scales, opacities, colors = self._gaussians(mode == "semantic", t_us, dynamic)
             out, alpha, _ = self.rasterization(
                 means=means, quats=quats, scales=scales, opacities=opacities, colors=colors,
                 viewmats=torch.linalg.inv(c2w_t)[None], Ks=K[None], width=w, height=h,
@@ -221,10 +235,13 @@ class Renderer:
             image = _turbo(1.0 - d) * (alpha > 0.5)
         else:  # opacity
             image = alpha.expand(h, w, 3)
+        rgb = (image.clamp(0, 1) * 255).byte().cpu().numpy()
+        if not with_depth:
+            return rgb, None
         # z-depth for viser to composite the frustums; background far away
         z = distance[..., 0] * dirs_cam[..., 2] / dirs_cam.norm(dim=-1)
         z = torch.where(alpha[..., 0] > 0.5, z, torch.full_like(z, 1e4))
-        return ((image.clamp(0, 1) * 255).byte().cpu().numpy(), z.cpu().numpy())
+        return rgb, z.cpu().numpy()
 
 
 def _turbo(x: torch.Tensor) -> torch.Tensor:
@@ -268,11 +285,16 @@ class Viewer:
             handle.on_update(lambda _: self.mark_all())
         for box in self.class_boxes.values():
             box.on_update(lambda _: self.update_classes())
-        self.show_cameras = None
+        self.show_cameras = self.occlude = None
         if scene.cameras is not None:
             self.show_cameras = gui.add_checkbox("context cameras", initial_value=True)
             self.show_cameras.on_update(lambda _: self._set_frustums_visible(self.show_cameras.value))
+            # The occlusion depth goes as a lossless PNG, ~20x the JPEG (2 MB at 1280x720), so it is off by
+            # default and, when on, sent with the refined frame only.
+            self.occlude = gui.add_checkbox("frustums behind geometry", initial_value=False)
+            self.occlude.on_update(lambda _: self.mark_all())
             self._add_frustums()
+        self.stats = gui.add_text("last frame", initial_value="", disabled=True)
         self.server.on_client_connect(self.on_connect)
         self.server.on_client_disconnect(lambda client: self.clients.pop(client.client_id, None))
 
@@ -338,14 +360,14 @@ class Viewer:
         while client.client_id in self.clients:
             if state["dirty"]:
                 state["dirty"], state["refine"] = False, True
-                self._render(client, self.preview_res.value)
-            elif state["refine"] and time.time() - state["moved"] > 0.3:
+                self._render(client, self.preview_res.value, refined=False)
+            elif state["refine"] and time.time() - state["moved"] > 0.2:
                 state["refine"] = False
-                self._render(client, self.max_res.value)
+                self._render(client, self.max_res.value, refined=True)
             else:
                 time.sleep(0.01)
 
-    def _render(self, client: viser.ClientHandle, res: int) -> None:
+    def _render(self, client: viser.ClientHandle, res: int, refined: bool) -> None:
         camera = client.camera
         aspect = camera.aspect
         w, h = (res, max(2, round(res / aspect))) if aspect >= 1 else (max(2, round(res * aspect)), res)
@@ -354,12 +376,18 @@ class Viewer:
         c2w[:3, 3] = camera.position
         f = 0.5 * h / math.tan(0.5 * camera.fov)
         K = np.array([[f, 0.0, 0.5 * w], [0.0, f, 0.5 * h], [0.0, 0.0, 1.0]])
+        start = time.perf_counter()
         image, z = self.renderer.render(
             c2w, K, (w, h), mode=self.mode.value, t_us=self.scene.t0 + int(self.time.value * 1e6),
             affine_index=self.scene.affine_names.index(self.affine.value) if self.scene.affine is not None else -1,
             dynamic=self.dynamic.value, near=self.near.value,
+            with_depth=refined and self.occlude is not None and self.occlude.value,
         )
+        rendered = time.perf_counter()
         client.scene.set_background_image(image, format="jpeg", jpeg_quality=int(self.jpeg.value), depth=z)
+        if refined:
+            self.stats.value = (f"{w}x{h}: render {1e3 * (rendered - start):.0f} ms, encode "
+                                f"{1e3 * (time.perf_counter() - rendered):.0f} ms{' + depth' if z is not None else ''}")
 
     def run(self) -> None:
         while True:

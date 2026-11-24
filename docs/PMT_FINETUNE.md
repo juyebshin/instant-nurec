@@ -156,6 +156,14 @@ page: a reduced size while the camera moves, then full size once it rests.
   Clicking a frustum looks through that frame, setting its pose, FoV, time and ISP camera.
 - Semantic colours need the `semantic_class` attribute, which `--index-path` runs write. NCore PLYs carry only
   road / sky masks.
+- Cost per view (2026-11-24, OpenScene scene, 2.0 M static + 8.7 M dynamic Gaussians, shared H200): render,
+  readback and JPEG take 10–20 ms. A frame is 22 kB moving (480 px) and 95 kB refined (1280×720). The
+  bottleneck was the depth image viser composites frustums with: a lossless PNG of 2 MB per 1280×720
+  frame (~20× the JPEG), 40 ms to encode, then the transfer and the browser's decode. It is now off by
+  default ("frustums behind geometry"), and when on it goes with refined frames only. The Gaussian set
+  (class filter + dynamic layer at the current time) is cached between frames. No distance or occlusion
+  culling: gsplat already skips off-screen Gaussians and stops each pixel once it is opaque, so culling would
+  lose far geometry for little gain.
 - `viser` 1.1.1 was pip-installed into `sjy-inurec` on 2026-11-24. It is not in `pyproject.toml` / `uv.lock`.
 - The viewer sets the gsplat JIT toolchain itself: the repo build cache, the env's `CUDA_HOME`, `bin/` on
   PATH, and the env's `CC` / `CXX` / nvcc `-ccbin`, as `conda activate` sets them. With `CXX` unset, torch
