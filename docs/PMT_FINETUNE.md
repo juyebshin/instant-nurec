@@ -9,7 +9,7 @@ rigs, whose Gaussians initialise RoGS road reconstruction in PseudoMapTrainer (P
 
 | File | Change |
 | --- | --- |
-| `instant_nurec/datasets/pmt_index.py` (new) | `PMTIndexDataset`: non-NCore logs from per-log index pickles (below). Same batch layout as `NCoreInstantNuRecDataset`: rig = ego, world = first camera's first context frame, global-shutter pinhole cameras, no cuboid tracks. |
+| `instant_nurec/datasets/pmt_index.py` (new) | `PMTIndexDataset`: non-NCore logs from per-log index pickles (below). Same batch layout as `NCoreInstantNuRecDataset`: rig = ego, world = first camera's first context frame, global-shutter pinhole cameras, no cuboid tracks (unless `cuboid_tracks` is set, below). |
 | `config_schema/dataset.py` | `PMTIndexDatasetConfig`. `index_paths` entries can be pickles or directories of pickles. |
 | `training/data.py` | Builds `PMTIndexDataset` for that config. |
 | `config_schema/dataset.py`, `datasets/mixture.py` | A `mixture` component may be a `PMTIndexDatasetConfig`, so datasets with different camera sets (AV2 7, nuScenes 6) mix in one run. |
@@ -21,11 +21,15 @@ rigs, whose Gaussians initialise RoGS road reconstruction in PseudoMapTrainer (P
 | `configs/training/pmt_av2_nusc.yaml`, `pmt_av2_nusc_smoke.yaml` (new) | AV2 + nuScenes fine-tune with 504×280 supervision, and its smoke at the same contract. |
 | `configs/training/pmt_geo_av2_nusc_waymo.yaml`, `pmt_geo_waymo_smoke.yaml` (new) | AV2 + nuScenes + Waymo on the geo splits PMT and mapnn use (§3), and a smoke of the Waymo path. |
 | `config_schema/dataset.py`, `datasets/pmt_index.py` | `PMTIndexDatasetConfig.semantic_remap` (default empty): class → class, composed onto the index's 8-class `semantic_lut`. `{5: 3, 6: 3, 7: 0}` trains the released 5-class head (2026-11-22). |
-| `datasets/pmt_index.py`, `training/losses.py`, `config_schema/train.py` | Index cameras with lens `distortion` (undistorted on load) and a separate `depth_grid`; the semantic loss is skipped, not NaN, on a batch with no mask; `loss.background_requires_semantics` (default off). |
+| `datasets/pmt_index.py`, `training/losses.py`, `config_schema/train.py` | Index cameras with lens `distortion` (undistorted on load), a separate `depth_grid` and (OpenScene) `seg_grid`; the semantic loss is skipped, not NaN, on a batch with no mask; `loss.background_requires_semantics` (default off). |
+| `config_schema/dataset.py`, `datasets/pmt_index.py` | `PMTIndexDatasetConfig.cuboid_tracks` (default off, 2026-11-23): an index's annotated boxes (`tracks`) become cuboid tracks as in `NCoreInstantNuRecDataset._compute_cuboid_tracks`, which turns on the upstream motion supervision (`primitive_velocity`) and box-driven dynamic layers. |
+| `configs/training/pmt_openscene_motion.yaml`, `pmt_openscene_motion_smoke.yaml` (new) | OpenScene-only fine-tune on its geo split with the motion head supervised by the boxes, and its smoke. |
+| `cli.py`, `model/__init__.py`, `model/system.py`, `datasets/datamodule.py`, `datasets/pmt_index.py`, `config_schema/{dataset,predict}.py`, `predict/{export_ply,export_cameras,render_preview}.py` | `run_inference.py --index-path` (2026-11-24): index logs through the NCore predict path (chunking, merge, PLY / sky / dynamic export, preview, video); `--checkpoint` runs a `.pth` or a fine-tune's Lightning `.ckpt`. Index runs also write `.cameras.npz` and a per-Gaussian `semantic_class` PLY attribute. NCore runs are unchanged. Details below. |
+| `tools/viewer.py` (new) | nerfstudio-style viser viewer of an exported scene, rendered on the GPU with the model's 3DGUT renderer. |
 
 **Index pickles.** These are written by PMT `RoGS/scripts/inurec_finetune_index.py`, which runs
 in env `sjy-rogs` because that env has the AV2 and nuScenes devkits; this env does not. The
-exporter handles AV2, nuScenes and (2026-11-21) Waymo.
+exporter handles AV2, nuScenes, (2026-11-21) Waymo and (2026-11-23) OpenScene.
 
 ```
 cameras: {name: {K, wh, T_cam_ego}}             # OpenCV camera frame
@@ -34,6 +38,7 @@ frames: {name: [{t_us, img, seg, depth}, ...]}  # every image; seg / depth may b
 semantic_lut: (256,) uint8                      # Mapillary Vistas v2 id -> KelvinSemanticClass, 255 = ignore
 # optional per camera (Waymo): distortion {K, D, wh}  -> img files are raw, undistorted onto K / wh on load
 #                              depth_grid {K, wh}     -> the depth files' own pinhole grid, resampled onto K / wh
+# optional (OpenScene): tracks {id: {label, dims (l, w, h), timestamps_us, T_box_world}}  -> annotated 3D boxes
 ```
 
 **Labels.**
@@ -85,6 +90,83 @@ Geo-split tree (2026-11-21, `logs/export_geo.sh`): `.../index/geo/{av2,nusc,waym
 mapnn's, and mapnn's Waymo list, commit 8ef6637). AV2 695 / 150; nuScenes 554 / 99 (the lists name
 657 / 124, but 103 / 25 of those scenes are from the official test split, which has no MoGe depth); Waymo
 700 / 151. AV2 geo-train and nuScenes are symlinks to the pickles above; geo-test is not indexed.
+
+OpenScene index (2026-11-23, `logs/export_openscene.sh`, for `pmt_openscene_motion.yaml`): `data/openscene` →
+`/home1/irteam/data/openscene` (NAVSIM log pickles, 2 Hz, 8 cameras at 1920×1080). The unit is a geo-split run
+`<log>:<first>-<last>` (mapnn's OpenScene "near" list, copied to `configs/splits/geo_near/openscene`; runs cut
+logs, ≥ 70 m between train and val frames), one pickle per run; runs under 8 frames are not exported, leaving
+443 train / 307 val runs. 32 runs drop a frame or two (1.0 / 1.5 s gaps); the sampler steps over them.
+- **Depth:** DVGT's MoGe-3 (`moge3_vitl`) labels of the 240 "lvpgh" logs (140 Pittsburgh, 100 Las Vegas), on
+  every frame and camera, hard-linked into `data/moge3/align_depth/openscene` (no extra disk). DVGT's quality
+  filter for them was still running; the index takes every label file. Lens distortion (k1 = −0.36) and the
+  depth grid are handled as for Waymo (DVGT `open_scene_loader.py`, num_tokens 2500); the reproduced grid
+  equals the intrinsics DVGT stored for each image.
+- **Masks:** from PMT `Mask2Former/demo/inference_openscene.py` (being rerun 2026-11-24) into
+  `data/m2f/openscene/<log>/seg_<CAM>/<token>.png` (symlink to PMT `data/m2f_infer_openscene`), Vistas v2 ids.
+  The exporter reads each camera's mask grid off its first mask: raw size (1920×1080) = predicted on the raw
+  image, undistorted on load as for Waymo; 846×476 = predicted on DVGT's MoGe image, so the camera gets
+  `seg_grid` (= `depth_grid`) and the loader resamples masks like depth (255 outside DVGT's crop, ~7% of the
+  frame). Any other size fails the export. The MoGe-grid case was checked on one run from the first mask pass
+  (masks line up with the undistorted images at cars, poles, kerbs and paint). The index picks masks up on
+  re-export (`REEXPORT=1 logs/export_openscene.sh`).
+- **Boxes:** NAVSIM `anns` (x, y, z, l, w, h, yaw in the lidar frame, which equals the ego frame here, plus
+  `track_tokens`), stored per track as box → world poses. Checked on one run: lifted MoGe-3 points fall inside
+  the vehicle boxes 1.6–1.9× more often with the true yaw than with yaw + 90°, so boxes, calibration and
+  poses agree.
+
+**Inference on index logs (2026-11-24).** `run_inference.py --index-path` takes index pickles (or
+directories of them) instead of `--ncore-path` and runs them through the same predict path:
+- Each log is cut into sequential chunks that cover it (`AdaptiveSequentialFrameBatchSampler`, as for NCore
+  clips). Every image is a context candidate; labels are not read.
+- One dataloader batch holds every chunk of one log, so `--merge` always merges the whole log.
+- Chunk merge, voxelisation, and the PLY / `.sky.npz` / `.dynamic.npz` export are the NCore ones.
+  `--render-preview` and `--render-video` work through a pinhole branch in `render_composited_frame`
+  (before this, those renders were F-theta only). `--render-video` renders every frame of the first camera
+  in the log; checked on the Waymo val log below (198 FRONT frames, 10 fps, 19.8 s).
+- Cameras default to all of the index's cameras in its order, which is the fine-tune's order, at any count.
+  The released model's 1 / 3 / 5 camera check applies to NCore input only.
+- OpenScene boxes become cuboid tracks, so `--motion-source tracks` uses them. The other datasets have no
+  boxes, so their dynamic layer is the MOVABLE pixels with learned motion.
+- The world is moved to the log's first rig pose; OpenScene's UTM coordinates (~4e6 m) would lose ~0.3 m to
+  float32. `.cameras.npz` stores the offset (`world_origin`; dataset world = PLY + `world_origin`) next to
+  every context camera's pose and K, for the viewer.
+- `--n-frames` (default 18) and `--max-frame-gap-us` (default 750000) set the chunking. The PMT
+  fine-tunes trained with 8 and 500000. At OpenScene's 2 Hz, the 500000 gap makes the sampler repeat a frame
+  in about half the chunks, as the NCore sampler does on sparse clips.
+- `--checkpoint` works with either input. It loads a weights-only `.pth` or a Lightning `.ckpt`, and reads
+  the semantic head width (5 / 8) from the weights.
+
+```bash
+INSTANT_NUREC_RUN_ID=geo-2576 CUDA_VISIBLE_DEVICES=0 python run_inference.py --model pa-multiview \
+  --index-path ../PseudoMapTrainer/RoGS/output/inurec_finetune/index/geo/waymo/val/10226164909075980558_180_000_200_000.pkl \
+  --checkpoint checkpoints/training/pmt-geo-av2-nusc-waymo-2ep/checkpoints/last.ckpt \
+  --n-frames 8 --max-frame-gap-us 500000 --max-chunks 12 --output-dir outputs/predict \
+  --merge --include-dynamic --render-preview
+CUDA_VISIBLE_DEVICES=0 python tools/viewer.py outputs/predict/geo-2576/ply/<seq>/<seq>.ply --port 8080
+```
+
+**Viewer.** `tools/viewer.py` serves a viser page on `127.0.0.1:<port>`; from another machine, use
+`ssh -L 8080:localhost:8080 <host>`. Like nerfstudio's viewer, each view is rendered here and streamed to the
+page: a reduced size while the camera moves, then full size once it rests.
+- Renderer: gsplat 3DGUT with calibrated pinhole rays, the call the model's preview uses. Its render of a
+  context camera matches the `--render-preview` PNG at 50.4 dB PSNR (AV2 val log, step 2576).
+- Render modes: rgb (over the sky cubemap, through the chosen camera's ISP affine), rgb without sky, semantic
+  class, depth and opacity.
+- Controls: per-class visibility, the dynamic layer at a time slider (with play), and context-camera frustums.
+  Clicking a frustum looks through that frame, setting its pose, FoV, time and ISP camera.
+- Semantic colours need the `semantic_class` attribute, which `--index-path` runs write. NCore PLYs carry only
+  road / sky masks.
+- `viser` 1.1.1 was pip-installed into `sjy-inurec` on 2026-11-24. It is not in `pyproject.toml` / `uv.lock`.
+- The viewer sets the gsplat JIT toolchain itself: the repo build cache, the env's `CUDA_HOME`, `bin/` on
+  PATH, and the env's `CC` / `CXX` / nvcc `-ccbin`, as `conda activate` sets them. With `CXX` unset, torch
+  writes `cxx = c++` and nvcc falls back to a `gcc` this machine lacks. Ninja then sees changed compile
+  commands, so it rebuilds and fails (`gcc: No such file or directory`).
+
+**ffmpeg (2026-11-24).** `--render-video` needs ffmpeg with libx264 on PATH. `conda install -c conda-forge
+ffmpeg` fails in `sjy-inurec`: the `gdk-pixbuf` post-link script picks up the env's cross-compiler activation
+and looks for `ld.gold` in the base env. The rollback also deletes `conda-meta/history`, which was recreated
+(with a note) after each attempt. The env's ffmpeg is instead the static build from pip `imageio-ffmpeg`
+0.8.1 (ffmpeg 9.0.2, libx264), linked as `bin/ffmpeg`.
 
 **Environment.** `sjy-inurec` alone. Since 2026-11-20 it carries its own gsplat JIT toolchain (conda
 `cuda-nvcc` 12.8, `gxx_linux-64` 11.4); until then it borrowed `sjy-mapnn`'s. From the repo root:
@@ -372,6 +454,30 @@ its `val/psnr` is not comparable to the pilot's.
     - The Gaussians are rasterised as point centres, which leaves far-range speckle, while RoGS is
       splatted. This counts against the Gaussians.
     - RoGS is a per-scene optimisation over the whole log.
+  - **More logs (2026-11-22).**
+    - Runs: `vislogs_run.sh` covers the logs of the mapnn views / BEV vis samples: 0031 = 366ceb72,
+      0101 = a059b6b9, 0171 = ded5ef6e. `heldout_run.sh` adds 5 logs. All use the same protocol and
+      scripts (sha256 in the logs), with the same four models. `road_summary.py` builds the table.
+    - The 5 added logs: 05fa5048, 47286726, 65387aee, 6c932547, e42aa296. They were drawn with a fixed
+      seed from the 25 AV2 val ∩ geo-val logs that have LiDAR road GT and a RoGS run, so they are held out
+      from every fine-tune, the geo run included.
+    - 366ceb72 and a059b6b9 are in AV2 train; the fine-tunes trained on them, so they are not counted.
+    - Held-out total: 9 logs (7fab, 02678d04, 0b5142c1, ded5ef6e and the 5 added).
+
+    | 9 held-out logs, median | median \|dz\| | IoU established | IoU surface vs GT surface |
+    |---|---|---|---|
+    | zero-shot | 0.634 | 0.548 | 0.637 |
+    | pilot step 1000 | 0.060 | 0.608 | 0.684 |
+    | pilot step 9000 | 0.031 | 0.586 | 0.730 |
+    | AV2+nuS step 2454 | 0.032 | 0.586 | 0.734 |
+
+    - **IoU-drop explanation holds.** Step 9000 and AV2+nuS beat step 1000 on surface vs GT surface on
+      9/9 logs, and lose to it on the established IoU on 8/9. Single seed per model.
+    - **Crosswalk.** The fine-tunes score ≤ 0.16 class IoU vs LiDAR on every log. RoGS scores 0.33–0.69 on
+      the 5 held-out logs where both the LiDAR labels and RoGS have crosswalk (7fab, 05fa5048, 65387aee,
+      6c932547, e42aa296).
+    - **Lane.** Step 9000 scores 0.14–0.47 and AV2+nuS 0.07–0.34, against RoGS's 0.24–0.59. Boundary is at
+      or above RoGS on 7 of the 9 logs; it is below on 0b5142c1 and ded5ef6e.
 
 **AV2 + nuScenes + Waymo on geo splits (2026-11-21, `pmt_geo_av2_nusc_waymo.yaml`).** The user chose to
 train on Waymo, on the geographically disjoint splits PMT and mapnn train and evaluate on, so numbers are

@@ -18,6 +18,11 @@
 ``--ncore-path`` accepts either a single ``.json`` ncorev4 sequence
 metadata file (NuRec-aligned) or a ``.lst`` manifest listing one JSON
 path per line (each absolute or relative-to-the-LST-file's directory).
+
+``--index-path`` (this branch) instead takes PseudoMapTrainer index pickles
+(AV2 / nuScenes / Waymo / OpenScene logs, ``PMTIndexDataset``), each log
+chunked and exported as an NCore sequence is. ``--checkpoint`` runs a
+fine-tune's weights instead of the released ones.
 """
 
 from __future__ import annotations
@@ -55,15 +60,53 @@ def make_parser() -> argparse.ArgumentParser:
             f"Default: {DEFAULT_MODEL_VARIANT}."
         ),
     )
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
         "--ncore-path",
         type=Path,
-        required=True,
         help=(
             "ncorev4 input. Either a single sequence ``.json`` (NuRec-aligned) "
             "or a ``.lst`` manifest with one JSON path per line "
             "(absolute or relative-to-the-LST-file's directory; "
             "``#``-prefixed and blank lines skipped)."
+        ),
+    )
+    source.add_argument(
+        "--index-path",
+        type=Path,
+        action="append",
+        help=(
+            "PseudoMapTrainer index input instead of NCore (AV2 / nuScenes / Waymo / OpenScene): a log's "
+            "``.pkl`` or a directory of them; repeatable. Context cameras default to all of the index's "
+            "cameras in its order (the fine-tune's order; any count). OpenScene boxes become cuboid tracks."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=None,
+        help=(
+            "Weights to run instead of the released ones: a weights-only .pth or a fine-tune's Lightning "
+            ".ckpt (e.g. checkpoints/training/<run>/checkpoints/last.ckpt). The semantic head width "
+            "(5 or 8) is read from the weights."
+        ),
+    )
+    parser.add_argument(
+        "--n-frames",
+        type=int,
+        default=None,
+        help=(
+            "--index-path only: frames per camera per chunk (default: the profile's, 18). The PMT "
+            "fine-tunes trained with 8."
+        ),
+    )
+    parser.add_argument(
+        "--max-frame-gap-us",
+        type=int,
+        default=750_000,
+        help=(
+            "--index-path only: max gap between a chunk's frames (default 750000, as NCore predict). "
+            "The PMT fine-tunes trained with 500000."
         ),
     )
     parser.add_argument(
@@ -196,6 +239,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--render-video requires --merge so one complete scene is rendered")
     if args.max_chunks <= 0:
         parser.error("--max-chunks must be greater than zero")
+    if args.index_path is None and (args.n_frames is not None or args.max_frame_gap_us != 750_000):
+        parser.error("--n-frames / --max-frame-gap-us apply to --index-path input only")
 
     if args.render_preview or args.render_video:
         from instant_nurec.predict.render_preview import require_gsplat
@@ -233,13 +278,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     from instant_nurec.ncore_input import resolve_ncore_paths
     from instant_nurec.predict.run import run_predict
 
+    profile = get_model_profile(args.model)
+    if args.index_path is not None:
+        return _main_index(args, parser, profile)
+
     json_paths = resolve_ncore_paths(args.ncore_path)
     if args.render_video and len(json_paths) != 1:
         parser.error(
             "--render-video currently requires exactly one resolved NCore sequence "
             "so all requested chunks are merged into one complete scene"
         )
-    profile = get_model_profile(args.model)
     camera_ids = list(args.camera_ids or profile.context_camera_ids)
     allowed_camera_counts = profile.supported_camera_counts
     if len(camera_ids) not in allowed_camera_counts:
@@ -295,9 +343,92 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             render_preview=args.render_preview,
             render_video=args.render_video,
+            checkpoint_path=str(args.checkpoint) if args.checkpoint is not None else None,
         ),
     )
     run_predict(config)
+    _print_next(args)
+    return 0
+
+
+def _main_index(args: argparse.Namespace, parser: argparse.ArgumentParser, profile) -> int:
+    """``--index-path``: PMT index logs through the same predict, merge and export path as NCore sequences."""
+    import pickle
+
+    from instant_nurec.config_schema.dataset import (
+        AdaptiveSequentialFrameBatchSamplerConfig,
+        InstantNuRecSplitsConfig,
+        NCoreInstantNuRecCuboidTracksParamsConfig,
+        PMTIndexDatasetConfig,
+    )
+    from instant_nurec.config_schema.instantnurec import GaussiansInstantNuRecSystemConfig, InstantNuRecConfig
+    from instant_nurec.config_schema.models import KelvinDPTDecoderConfig, KelvinModelConfig
+    from instant_nurec.config_schema.predict import PredictConfig, PrimitiveMergeConfig
+    from instant_nurec.predict.run import run_predict
+
+    if profile.decoder_kind != "pixel-aligned":
+        parser.error("--index-path requires a pixel-aligned profile (pa-front or pa-multiview)")
+    index_paths: list[Path] = []
+    for path in args.index_path:
+        found = sorted(path.glob("*.pkl")) if path.is_dir() else [path]
+        if not found or not all(p.is_file() for p in found):
+            parser.error(f"--index-path {path}: no index pickle")
+        index_paths.extend(found)
+    if args.render_video and len(index_paths) != 1:
+        parser.error("--render-video currently requires exactly one index log")
+    with open(index_paths[0], "rb") as f:
+        first = pickle.load(f)
+    camera_ids = list(args.camera_ids or first["cameras"])
+    n_frames = args.n_frames or profile.n_frames_per_sample
+    logging.getLogger(__name__).info(
+        "%d index log(s), cameras %s, %d frames per camera per chunk, gap <= %d us",
+        len(index_paths), camera_ids, n_frames, args.max_frame_gap_us,
+    )
+    config = InstantNuRecConfig(
+        out_dir=str(args.output_dir),
+        release_profile=args.model,
+        # one batch = every chunk of one log, so --merge always merges a whole log
+        system=GaussiansInstantNuRecSystemConfig(predict_batch_size=args.max_chunks),
+        model=KelvinModelConfig(
+            decoder=KelvinDPTDecoderConfig(motion_depth=profile.motion_depth),
+            track_padding_m=args.cuboid_padding,
+        ),
+        dataset=InstantNuRecSplitsConfig(
+            predict=PMTIndexDatasetConfig(
+                index_paths=[str(p) for p in index_paths],
+                camera_ids=camera_ids,
+                camera_subsampler={"frame_width": profile.frame_width, "frame_height": profile.frame_height},
+                n_frames_per_sample=n_frames,
+                context_requires_depth=False,  # images only: every frame is a context candidate
+                depth=False,
+                semantic_segmentation=False,
+                cuboid_tracks=NCoreInstantNuRecCuboidTracksParamsConfig() if "tracks" in first else None,
+                frame_batch_sampler=AdaptiveSequentialFrameBatchSamplerConfig(
+                    n_frames_per_sample=n_frames,
+                    n_samples_per_sequence=args.max_chunks,
+                    max_frame_gap_timestamp_us=args.max_frame_gap_us,
+                ),
+            ),
+        ),
+        predict=PredictConfig(
+            include_dynamic=args.include_dynamic,
+            motion_source=args.motion_source,
+            primitive_merge=PrimitiveMergeConfig(
+                enabled=args.merge,
+                enable_voxelization=args.merge,
+                target_n_gaussians=args.n_gaussians,
+            ),
+            render_preview=args.render_preview,
+            render_video=args.render_video,
+            checkpoint_path=str(args.checkpoint) if args.checkpoint is not None else None,
+        ),
+    )
+    run_predict(config)
+    _print_next(args)
+    return 0
+
+
+def _print_next(args: argparse.Namespace) -> None:
     if args.merge:
         print(
             "Next: refine into USDZ with NuRec — "
@@ -311,7 +442,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             "or ply_viewer (NuRec container).",
             flush=True,
         )
-    return 0
 
 
 if __name__ == "__main__":

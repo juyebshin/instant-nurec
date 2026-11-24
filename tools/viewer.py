@@ -1,0 +1,392 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""Interactive viewer for ``run_inference.py`` outputs, nerfstudio-style: a viser web page whose view is rendered
+on the GPU here (gsplat 3DGUT, as the model's own renderer) and streamed to the browser.
+
+Reads ``<scene>.ply`` and, when they sit next to it, ``.sky.npz`` (sky cubemap + per-camera ISP affine),
+``.dynamic.npz`` (``--include-dynamic``) and ``.cameras.npz`` (context cameras; written for ``--index-path`` runs).
+
+    CUDA_VISIBLE_DEVICES=0 python tools/viewer.py outputs/predict/<run>/ply/<seq>/<seq>.ply --port 8080
+
+then open http://localhost:8080 (through ``ssh -L 8080:localhost:8080 <host>`` from another machine).
+
+Render modes: rgb (Gaussians over the sky, through the chosen camera's ISP affine, as the model renders), rgb
+without sky, semantic class (the PLY's ``semantic_class`` from ``--index-path`` runs; otherwise only its road / sky
+masks), depth (ray distance) and opacity. Click a context-camera frustum to look through it: the view, time and
+ISP camera snap to that frame. Moving the camera renders at a reduced size and refines once the view rests.
+"""
+
+from __future__ import annotations
+
+import argparse
+import math
+import os
+import sys
+import threading
+import time
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+
+
+def _gsplat_toolchain_defaults() -> None:
+    """The repo's gsplat JIT build with this env's own toolchain (CLAUDE.md), as ``conda activate sjy-inurec`` sets
+    it. Without CC / CXX, torch writes ``cxx = c++`` and nvcc falls back to a ``gcc`` this machine lacks; ninja
+    then sees changed compile commands and rebuilds, which fails. Paths keep the activated spelling
+    (CONDA_PREFIX), since ninja compares command text and the cache was built with it."""
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    same_env = conda_prefix is not None and os.path.exists(conda_prefix) and os.path.samefile(conda_prefix, sys.prefix)
+    prefix = conda_prefix if same_env else sys.prefix
+    os.environ.setdefault("TORCH_EXTENSIONS_DIR", str(REPO / ".cache" / "torch_extensions"))
+    os.environ.setdefault("CUDA_HOME", prefix)
+    bin_dir = os.path.join(prefix, "bin")  # ninja, nvcc
+    if bin_dir not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+    cc, cxx = (os.path.join(prefix, "bin", f"x86_64-conda-linux-gnu-{name}") for name in ("cc", "c++"))
+    if "CXX" not in os.environ and os.path.exists(cxx):
+        os.environ.setdefault("CC", cc)
+        os.environ["CXX"] = cxx
+        if "-ccbin" not in os.environ.get("NVCC_PREPEND_FLAGS", ""):
+            os.environ["NVCC_PREPEND_FLAGS"] = f"{os.environ.get('NVCC_PREPEND_FLAGS', '')} -ccbin={cxx}"
+
+
+_gsplat_toolchain_defaults()
+sys.path.insert(0, str(REPO))
+
+import numpy as np  # noqa: E402
+import point_cloud_utils as pcu  # noqa: E402
+import torch  # noqa: E402
+import viser  # noqa: E402
+import viser.transforms as vtf  # noqa: E402
+
+from instant_nurec.predict.render_preview import (  # noqa: E402
+    _reference_renderer_config,
+    _reference_ut_parameters,
+    require_gsplat,
+)
+from instant_nurec.primitives.kelvin_primitive import KelvinDynamicLayer, KelvinSemanticClass  # noqa: E402
+from instant_nurec.utils.cubemap import sample_sky_cubemap  # noqa: E402
+from instant_nurec.utils.gaussians.utils import C0  # noqa: E402
+
+PALETTE = {  # class -> RGB (Cityscapes-like)
+    KelvinSemanticClass.OTHERS: (150, 150, 150),
+    KelvinSemanticClass.EGO: (20, 20, 20),
+    KelvinSemanticClass.SKY: (70, 130, 180),
+    KelvinSemanticClass.ROAD: (128, 64, 128),
+    KelvinSemanticClass.MOVABLE: (0, 0, 230),
+}
+for _name, _rgb in (("LANE", (250, 230, 30)), ("CROSSWALK", (255, 255, 255)), ("BOUNDARY", (255, 120, 0))):
+    if hasattr(KelvinSemanticClass, _name):
+        PALETTE[KelvinSemanticClass[_name]] = _rgb
+CAMERA_COLORS = [(230, 25, 75), (60, 180, 75), (255, 225, 25), (0, 130, 200), (245, 130, 48), (145, 30, 180),
+                 (70, 240, 240), (240, 50, 230), (210, 245, 60)]
+
+
+def _sidecar(ply: Path, suffix: str) -> Path | None:
+    path = ply.with_suffix(suffix)
+    return path if path.exists() else None
+
+
+class Scene:
+    """The exported Gaussians and sidecars on the GPU."""
+
+    def __init__(self, ply: Path, device: torch.device):
+        mesh = pcu.load_triangle_mesh(str(ply))
+        attrs = mesh.vertex_data.custom_attributes
+        t = lambda a: torch.as_tensor(np.ascontiguousarray(a), device=device)  # noqa: E731
+        self.positions = t(mesh.vertex_data.positions).float()
+        self.rotations = torch.nn.functional.normalize(
+            t(np.stack([attrs[f"rot_{i}"] for i in range(4)], -1)).float(), dim=-1)  # wxyz
+        self.scales = t(np.stack([attrs[f"scale_{i}"] for i in range(3)], -1)).float().exp()
+        self.densities = torch.sigmoid(t(attrs["opacity"]).float())
+        self.rgb = t(np.stack([attrs[f"f_dc_{i}"] for i in range(3)], -1)).float() * C0 + 0.5
+        if "semantic_class" in attrs:
+            self.semantic = t(attrs["semantic_class"]).long()
+            self.semantic_source = "semantic_class"
+        else:  # NCore / older outputs: the PLY keeps road and sky masks only
+            self.semantic = torch.full_like(self.densities, int(KelvinSemanticClass.OTHERS), dtype=torch.long)
+            if "road_mask" in attrs:
+                self.semantic[t(attrs["road_mask"]) > 0] = int(KelvinSemanticClass.ROAD)
+            if "sky_mask" in attrs:
+                self.semantic[t(attrs["sky_mask"]) > 0.5] = int(KelvinSemanticClass.SKY)
+            self.semantic_source = "road_mask / sky_mask"
+        self.classes = sorted(int(c) for c in self.semantic.unique().tolist())
+
+        self.sky = self.affine = None
+        self.affine_names = ["(none)"]
+        if (path := _sidecar(ply, ".sky.npz")) is not None:
+            sky = np.load(path)
+            self.sky = t(sky["sky_cubemap"]).float()
+            self.affine = t(sky["affine_matrix"]).float()
+            self.affine_names = [str(n) for n in sky["affine_sensor_ids"]]
+
+        self.dynamic = None
+        if (path := _sidecar(ply, ".dynamic.npz")) is not None:
+            dyn = np.load(path)
+            if int(dyn["n_layers"]) > 0 and len(dyn["layer_0_max_densities"]) > 0:
+                bounds = dyn["layer_0_motion_time_bounds_us"] if "layer_0_motion_time_bounds_us" in dyn else None
+                self.dynamic = KelvinDynamicLayer(
+                    rotations=t(dyn["layer_0_rotations"]).float(),
+                    scales=t(dyn["layer_0_scales"]).float(),
+                    rgb=t(dyn["layer_0_rgb"]).float(),
+                    max_densities=t(dyn["layer_0_max_densities"]).float(),
+                    keyframe_positions=t(dyn["layer_0_keyframe_positions"]).float(),
+                    keyframe_timestamps_us=t(dyn["layer_0_keyframe_timestamps_us"]).long(),
+                    falloff=bool(dyn["layer_0_falloff"]),
+                    motion_time_bounds_us=None if bounds is None else t(bounds).long(),
+                )
+
+        self.cameras = None
+        if (path := _sidecar(ply, ".cameras.npz")) is not None:
+            self.cameras = {k: v for k, v in np.load(path).items()}
+        if self.cameras is not None:
+            stamps = self.cameras["timestamps_us"]
+        elif self.dynamic is not None:
+            stamps = self.dynamic.keyframe_timestamps_us[:, 1].cpu().numpy()
+        else:
+            stamps = np.zeros(1, np.int64)
+        self.t0, self.t1 = int(stamps.min()), int(stamps.max())
+
+
+class Renderer:
+    def __init__(self, scene: Scene):
+        self.scene = scene
+        self.rasterization = require_gsplat()
+        self.lock = threading.Lock()  # one render at a time on the GPU
+        self.static_keep = torch.ones_like(scene.densities, dtype=torch.bool)
+        self.show_movable = True  # the dynamic layer is MOVABLE; the class filter hides it with that class
+        self.palette = torch.zeros(256, 3, device=scene.positions.device)
+        for c, rgb in PALETTE.items():
+            self.palette[int(c)] = torch.tensor(rgb, dtype=torch.float32, device=self.palette.device) / 255.0
+
+    def set_classes(self, classes: set[int]) -> None:
+        keep = torch.zeros(256, dtype=torch.bool, device=self.scene.semantic.device)
+        keep[list(classes)] = True
+        self.static_keep = keep[self.scene.semantic]
+
+    @torch.inference_mode()
+    def render(self, c2w: np.ndarray, K: np.ndarray, wh: tuple[int, int], *, mode: str, t_us: int,
+               affine_index: int, dynamic: bool, near: float) -> tuple[np.ndarray, np.ndarray]:
+        """OpenCV camera-to-world ``c2w`` and pinhole ``K`` at ``wh`` -> (uint8 RGB image, z-depth)."""
+        s, (w, h) = self.scene, wh
+        device = s.positions.device
+        K = torch.as_tensor(K, dtype=torch.float32, device=device)
+        c2w_t = torch.as_tensor(c2w, dtype=torch.float32, device=device)
+        # calibrated world rays (origin, direction), as the model's renderer takes them
+        v, u = torch.meshgrid(torch.arange(h, device=device) + 0.5, torch.arange(w, device=device) + 0.5,
+                              indexing="ij")
+        dirs_cam = torch.stack([(u - K[0, 2]) / K[0, 0], (v - K[1, 2]) / K[1, 1], torch.ones_like(u)], -1)
+        dirs = torch.nn.functional.normalize(dirs_cam @ c2w_t[:3, :3].T, dim=-1)
+        rays = torch.cat([c2w_t[:3, 3].expand(h, w, 3), dirs], -1).contiguous()
+
+        keep = self.static_keep
+        means, quats, scales = s.positions[keep], s.rotations[keep], s.scales[keep]
+        opacities, colors = s.densities[keep], s.rgb[keep]
+        if mode == "semantic":
+            colors = self.palette[s.semantic[keep]]
+        if dynamic and s.dynamic is not None and self.show_movable:
+            layer = s.dynamic.interpolate(t_us)
+            visible = torch.isfinite(layer.positions).all(-1) & (layer.densities[:, 0] > 1e-5)
+            means = torch.cat([means, layer.positions[visible]])
+            quats = torch.cat([quats, torch.nn.functional.normalize(layer.rotations[visible], dim=-1)])
+            scales = torch.cat([scales, layer.scales[visible]])
+            opacities = torch.cat([opacities, layer.densities[visible, 0]])
+            dyn_colors = (self.palette[int(KelvinSemanticClass.MOVABLE)].expand(int(visible.sum()), 3)
+                          if mode == "semantic" else layer.rgb[visible])
+            colors = torch.cat([colors, dyn_colors])
+
+        with self.lock:
+            out, alpha, _ = self.rasterization(
+                means=means, quats=quats, scales=scales, opacities=opacities, colors=colors,
+                viewmats=torch.linalg.inv(c2w_t)[None], Ks=K[None], width=w, height=h,
+                near_plane=near, far_plane=torch.finfo(torch.float32).max, sh_degree=None, render_mode="RGB-d",
+                packed=False, with_ut=True, ut_params=_reference_ut_parameters(),
+                renderer_config=_reference_renderer_config(), with_eval3d=True, global_z_order=False,
+                rays=rays[None], camera_model="pinhole",
+            )
+        fg, alpha = out[0, ..., :3], alpha[0]
+        distance = out[0, ..., 3:4] / alpha.clamp_min(1e-6)
+        if mode == "rgb" or mode == "rgb (no sky)":
+            image = fg
+            if mode == "rgb" and s.sky is not None:
+                image = image + (1.0 - alpha) * sample_sky_cubemap(s.sky, dirs)
+            if s.affine is not None and affine_index >= 0:
+                affine = s.affine[affine_index]
+                image = image @ affine[:, :3].T + affine[:, 3]
+        elif mode == "semantic":
+            image = fg + (1.0 - alpha) * 0.08
+        elif mode == "depth":
+            d = distance[..., 0].clamp(0.5, 200.0).log()
+            d = (d - math.log(0.5)) / (math.log(200.0) - math.log(0.5))
+            image = _turbo(1.0 - d) * (alpha > 0.5)
+        else:  # opacity
+            image = alpha.expand(h, w, 3)
+        # z-depth for viser to composite the frustums; background far away
+        z = distance[..., 0] * dirs_cam[..., 2] / dirs_cam.norm(dim=-1)
+        z = torch.where(alpha[..., 0] > 0.5, z, torch.full_like(z, 1e4))
+        return ((image.clamp(0, 1) * 255).byte().cpu().numpy(), z.cpu().numpy())
+
+
+def _turbo(x: torch.Tensor) -> torch.Tensor:
+    """Google turbo colormap (polynomial fit), x in [0, 1] -> RGB."""
+    x = x.clamp(0, 1)[..., None]
+    r = 0.13572138 + x * (4.61539260 + x * (-42.66032258 + x * (132.13108234 + x * (-152.94239396 + x * 59.28637943))))
+    g = 0.09140261 + x * (2.19418839 + x * (4.84296658 + x * (-14.18503333 + x * (4.27729857 + x * 2.82956604))))
+    b = 0.10667330 + x * (12.64194608 + x * (-60.58204836 + x * (110.36276771 + x * (-89.90310912 + x * 27.34824973))))
+    return torch.cat([r, g, b], -1).clamp(0, 1)
+
+
+class Viewer:
+    def __init__(self, scene: Scene, renderer: Renderer, port: int, host: str):
+        self.scene, self.renderer = scene, renderer
+        self.server = viser.ViserServer(host=host, port=port)
+        self.server.scene.set_up_direction("+z")
+        self.clients: dict[int, dict] = {}
+        gui = self.server.gui
+        n_static = len(scene.positions)
+        n_dynamic = 0 if scene.dynamic is None else len(scene.dynamic)
+        gui.add_markdown(f"**{n_static:,}** static, **{n_dynamic:,}** dynamic Gaussians  \n"
+                         f"classes from {scene.semantic_source}")
+        self.mode = gui.add_dropdown("render", ("rgb", "rgb (no sky)", "semantic", "depth", "opacity"), initial_value="rgb")
+        self.max_res = gui.add_slider("max resolution", min=256, max=2560, step=64, initial_value=1280)
+        self.preview_res = gui.add_slider("moving resolution", min=128, max=1280, step=64, initial_value=480)
+        self.jpeg = gui.add_slider("jpeg quality", min=50, max=100, step=5, initial_value=85)
+        self.near = gui.add_slider("near plane [m]", min=0.05, max=5.0, step=0.05, initial_value=0.2)
+        self.affine = gui.add_dropdown("ISP camera", tuple(scene.affine_names), initial_value=scene.affine_names[0])
+        self.dynamic = gui.add_checkbox("dynamic layer", initial_value=n_dynamic > 0, disabled=n_dynamic == 0)
+        span = max((scene.t1 - scene.t0) / 1e6, 0.05)
+        self.time = gui.add_slider("time [s]", min=0.0, max=span, step=0.05, initial_value=0.0,
+                                   disabled=n_dynamic == 0)
+        self.play = gui.add_checkbox("play", initial_value=False, disabled=n_dynamic == 0)
+        with gui.add_folder("classes"):
+            self.class_boxes = {
+                c: gui.add_checkbox(f"{c} {KelvinSemanticClass(c).name}" if c in KelvinSemanticClass._value2member_map_
+                                    else str(c), initial_value=True)
+                for c in scene.classes
+            }
+        for handle in (self.mode, self.affine, self.dynamic, self.time, self.near):
+            handle.on_update(lambda _: self.mark_all())
+        for box in self.class_boxes.values():
+            box.on_update(lambda _: self.update_classes())
+        self.show_cameras = None
+        if scene.cameras is not None:
+            self.show_cameras = gui.add_checkbox("context cameras", initial_value=True)
+            self.show_cameras.on_update(lambda _: self._set_frustums_visible(self.show_cameras.value))
+            self._add_frustums()
+        self.server.on_client_connect(self.on_connect)
+        self.server.on_client_disconnect(lambda client: self.clients.pop(client.client_id, None))
+
+    # ------------------------------------------------------------------ scene objects
+    def _add_frustums(self) -> None:
+        cams = self.scene.cameras
+        names = list(dict.fromkeys(str(n) for n in cams["camera"]))
+        self.frustums = []
+        for i, (c2w, K, wh, name) in enumerate(zip(cams["c2w"], cams["K"], cams["wh"], cams["camera"])):
+            w, h = (int(x) for x in wh)
+            handle = self.server.scene.add_camera_frustum(
+                f"/cameras/{name}/{i:04d}", fov=2 * math.atan(0.5 * h / K[1, 1]), aspect=w / h, scale=0.4,
+                color=CAMERA_COLORS[names.index(str(name)) % len(CAMERA_COLORS)],
+                wxyz=vtf.SO3.from_matrix(c2w[:3, :3]).wxyz, position=c2w[:3, 3],
+            )
+            handle.on_click(lambda event, i=i: self.snap(event.client, i))
+            self.frustums.append(handle)
+
+    def _set_frustums_visible(self, visible: bool) -> None:
+        for handle in self.frustums:
+            handle.visible = visible
+
+    def snap(self, client: viser.ClientHandle, i: int) -> None:
+        """Look through context frame ``i``: its pose, vertical FoV, time and ISP camera."""
+        cams = self.scene.cameras
+        c2w, K, wh = cams["c2w"][i], cams["K"][i], cams["wh"][i]
+        with client.atomic():
+            client.camera.fov = 2 * math.atan(0.5 * float(wh[1]) / float(K[1, 1]))
+            client.camera.wxyz = vtf.SO3.from_matrix(c2w[:3, :3]).wxyz
+            client.camera.position = c2w[:3, 3]
+        self.time.value = min(max((int(cams["timestamps_us"][i]) - self.scene.t0) / 1e6, 0.0), self.time.max)
+        if str(cams["camera"][i]) in self.scene.affine_names:
+            self.affine.value = str(cams["camera"][i])
+
+    def update_classes(self) -> None:
+        on = {c for c, box in self.class_boxes.items() if box.value}
+        self.renderer.set_classes(on)
+        self.renderer.show_movable = int(KelvinSemanticClass.MOVABLE) in on
+        self.mark_all()
+
+    # ------------------------------------------------------------------ clients
+    def mark_all(self) -> None:
+        for state in self.clients.values():
+            state["dirty"] = True
+
+    def on_connect(self, client: viser.ClientHandle) -> None:
+        state = {"dirty": True, "moved": time.time(), "refine": False}
+        self.clients[client.client_id] = state
+
+        @client.camera.on_update
+        def _(_camera) -> None:
+            state["dirty"], state["moved"] = True, time.time()
+
+        if self.scene.cameras is not None:
+            self.snap(client, 0)
+        else:  # above the scene centre, looking down the road
+            centre = self.scene.positions.median(0).values.cpu().numpy()
+            client.camera.position = centre + np.array([-30.0, 0.0, 20.0])
+            client.camera.look_at = centre
+        threading.Thread(target=self._loop, args=(client, state), daemon=True).start()
+
+    def _loop(self, client: viser.ClientHandle, state: dict) -> None:
+        while client.client_id in self.clients:
+            if state["dirty"]:
+                state["dirty"], state["refine"] = False, True
+                self._render(client, self.preview_res.value)
+            elif state["refine"] and time.time() - state["moved"] > 0.3:
+                state["refine"] = False
+                self._render(client, self.max_res.value)
+            else:
+                time.sleep(0.01)
+
+    def _render(self, client: viser.ClientHandle, res: int) -> None:
+        camera = client.camera
+        aspect = camera.aspect
+        w, h = (res, max(2, round(res / aspect))) if aspect >= 1 else (max(2, round(res * aspect)), res)
+        c2w = np.eye(4)
+        c2w[:3, :3] = vtf.SO3(camera.wxyz).as_matrix()
+        c2w[:3, 3] = camera.position
+        f = 0.5 * h / math.tan(0.5 * camera.fov)
+        K = np.array([[f, 0.0, 0.5 * w], [0.0, f, 0.5 * h], [0.0, 0.0, 1.0]])
+        image, z = self.renderer.render(
+            c2w, K, (w, h), mode=self.mode.value, t_us=self.scene.t0 + int(self.time.value * 1e6),
+            affine_index=self.scene.affine_names.index(self.affine.value) if self.scene.affine is not None else -1,
+            dynamic=self.dynamic.value, near=self.near.value,
+        )
+        client.scene.set_background_image(image, format="jpeg", jpeg_quality=int(self.jpeg.value), depth=z)
+
+    def run(self) -> None:
+        while True:
+            if self.play.value and not self.play.disabled:
+                self.time.value = (self.time.value + 0.1) % (self.time.max + 1e-6)  # 0.1 s per tick
+                time.sleep(0.1)
+            else:
+                time.sleep(0.2)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("ply", type=Path, help="a PLY written by run_inference.py (merged or one chunk)")
+    ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--host", default="127.0.0.1", help="127.0.0.1 (shared machine): reach it through ssh -L; "
+                    "0.0.0.0 serves every network interface")
+    args = ap.parse_args()
+    device = torch.device("cuda")
+    t = time.time()
+    scene = Scene(args.ply, device)
+    n_dynamic = 0 if scene.dynamic is None else len(scene.dynamic)
+    n_cameras = 0 if scene.cameras is None else len(scene.cameras["c2w"])
+    print(f"Loaded {len(scene.positions):,} static + {n_dynamic:,} dynamic Gaussians, {n_cameras} context cameras "
+          f"in {time.time() - t:.1f} s", flush=True)
+    viewer = Viewer(scene, Renderer(scene), args.port, args.host)
+    viewer.run()
+
+
+if __name__ == "__main__":
+    main()

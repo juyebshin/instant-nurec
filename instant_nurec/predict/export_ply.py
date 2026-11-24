@@ -40,6 +40,7 @@ class PLYExportGaussians:
     road_mask: torch.Tensor | None = None
     sky_mask: torch.Tensor | None = None
     normals: torch.Tensor | None = None
+    semantic_class: torch.Tensor | None = None
 
     def export(self, output_path: Path):
         """
@@ -58,6 +59,8 @@ class PLYExportGaussians:
             custom_attributes["road_mask"] = self.road_mask
         if self.sky_mask is not None:
             custom_attributes["sky_mask"] = self.sky_mask
+        if self.semantic_class is not None:
+            custom_attributes["semantic_class"] = self.semantic_class
 
         write_ply_3dgs(
             path=output_path,
@@ -72,8 +75,8 @@ class PLYExportGaussians:
         )
 
 
-def export_kelvin_ply(primitives: KelvinInstantNuRecPrimitive) -> PLYExportGaussians:
-    """Export the ply file, static layer only."""
+def export_kelvin_ply(primitives: KelvinInstantNuRecPrimitive, semantic_class: bool = False) -> PLYExportGaussians:
+    """Export the ply file, static layer only. ``semantic_class``: also the per-Gaussian argmax class (uint8)."""
     static_layer = primitives.static_layer
 
     finite_mask = torch.isfinite(static_layer.densities).squeeze(-1)
@@ -97,10 +100,17 @@ def export_kelvin_ply(primitives: KelvinInstantNuRecPrimitive) -> PLYExportGauss
         road_mask=road_mask,
         sky_mask=sky_mask,
         normals=static_layer.normals,
+        semantic_class=(
+            static_layer.semantic_class.squeeze(-1).to(dtype=torch.uint8)
+            if semantic_class and static_layer.semantic_class is not None
+            else None
+        ),
     )
 
 
-def export_ply(primitives: KelvinInstantNuRecPrimitive, rig_trajectories: RigTrajectories, path: Path) -> None:
+def export_ply(
+    primitives: KelvinInstantNuRecPrimitive, rig_trajectories: RigTrajectories, path: Path, semantic_class: bool = False
+) -> None:
     """Export the InstantNuRec Primitives as a ply file after transforming to world space and applying some filtering.
     This ply export is intended to be used as an initialization for NuRec SO.
     """
@@ -111,5 +121,5 @@ def export_ply(primitives: KelvinInstantNuRecPrimitive, rig_trajectories: RigTra
         rig_trajectories.T_world_base.to(device=primitives.device(), dtype=torch.float32)
     )
 
-    gaussians_ply = export_kelvin_ply(primitives)
+    gaussians_ply = export_kelvin_ply(primitives, semantic_class=semantic_class)
     gaussians_ply.export(path)

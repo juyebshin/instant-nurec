@@ -33,11 +33,14 @@ Be accurate about this in every plan and report. Sources: `docs/PMT_FINETUNE.md`
 | HD map: ROAD Gaussians vs LiDAR road (road test, 3 AV2 logs) | measured. Height reaches the MoGe-label level (median \|dz\| 0.025–0.039 m). IoU is 2–4 points below step 1000. Likely cause (2026-11-22): the LiDAR GT includes boundary points. Against GT road surface, step 9000 is ahead on all 3 logs (single seed). |
 | RoGS training initialised from these Gaussians | **not reported here.** Do not claim it. |
 | Multi-rig geometry | **planned** (`PMT_FINETUNE.md` §3). Zero-shot range ratio is 0.47 (Waymo) to 1.01 (HRDX). Waymo moved into training (geo split) 2026-11-21; HRDX is the held-out rig. |
-| Index export for DDAD / KITTI / OpenScene | **not implemented** |
+| Index export for DDAD / KITTI | **not implemented** |
+| OpenScene index (geo-split runs, 8 cameras, MoGe-3 depth, annotated boxes) | implemented 2026-11-23 (`logs/export_openscene.sh`); no M2F masks yet (user is generating them) |
+| Motion head supervised by cuboid tracks on PMT data (`PMTIndexDatasetConfig.cuboid_tracks`, `pmt_openscene_motion.yaml`) | implemented 2026-11-23, default off; **not trained yet**. Every earlier PMT fine-tune skipped `primitive_velocity` (no tracks) |
 | Varying camera count or aspect from step to step in training | camera count verified (7 ↔ 6 at batch 1, AV2 + nuScenes smoke, 2026-11-20). **Aspect unverified**: always 504×280. |
 | Save on train end | fixed 2026-11-20 (`training/run.py::_StepCheckpoint`) |
 | Occupancy: head, GT loader, metric | **not implemented.** `KelvinStaticLayer.voxelize` merges Gaussians; it is not occupancy. |
-| Simulation export: PLY, sky, dynamic `.npz`, calibrated preview / video | implemented (upstream), released weights only. The public CLI does not load fine-tuned `.ckpt`. |
+| Simulation export: PLY, sky, dynamic `.npz`, calibrated preview / video | implemented (upstream) for NCore. Since 2026-11-24, `run_inference.py --checkpoint` also loads a fine-tune's `.ckpt`, and `--index-path` runs PMT index logs (AV2 / nuScenes / Waymo / OpenScene) through the same chunk, merge and export path, with pinhole preview and video. Smoke-tested on one geo-val log per dataset; no eval. |
+| Interactive viewer of exported scenes (`tools/viewer.py`, viser) | implemented 2026-11-24: server-side 3DGUT render matching the preview render; rgb / semantic / depth / opacity, class filter, dynamic time slider, context-camera frustums |
 | Next-frame render on AV2 (static pixels) | measured. Step 9000: 19.43 dB vs hold 17.14. LPIPS still favours hold. |
 | Tests for this branch's additions | **none** |
 

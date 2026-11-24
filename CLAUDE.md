@@ -54,10 +54,11 @@ instant-nurec --model pa-multiview --ncore-path <seq.json|manifest.lst> --output
   [--merge [--n-gaussians N]] [--include-dynamic [--motion-source learned]] [--render-preview | --merge --render-video]
 ```
 
-The public CLI loads only the released weights-only `.pth` (`INSTANT_NUREC_FULL_PT` overrides the
-path) into the 5-class config. To run a fine-tuned Lightning `.ckpt`, strip `model.`, filter to the
-`KelvinStaticCore` keys and build the decoder with `n_semantic_classes=8`. That is what PMT
-`RoGS/scripts/inurec_road_run.py` and mapnn `tools/analysis_tools/inurec_zeroshot_run.py` do.
+By default the CLI loads the released weights-only `.pth` (`INSTANT_NUREC_FULL_PT` overrides the
+path). `run_inference.py --checkpoint <.pth|.ckpt>` runs a fine-tune instead, reading the semantic head width
+from the weights. `--index-path <pkl|dir>` replaces `--ncore-path` for PMT index logs, and `tools/viewer.py
+<ply>` serves an interactive viewer of the export (both in `docs/PMT_FINETUNE.md`, 2026-11-24). PMT
+`RoGS/scripts/inurec_road_run.py` and mapnn `tools/analysis_tools/inurec_zeroshot_run.py` load `.ckpt` themselves.
 
 Training:
 

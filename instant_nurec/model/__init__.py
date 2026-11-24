@@ -80,7 +80,7 @@ def _preflight_validate_camera_ids(config: "InstantNuRecConfig") -> None:
     and run ``_validate_camera_ids``. Cheap relative to a full inference
     run; runs once in the main process before workers spin up."""
     dataset_cfg = config.dataset.predict
-    if dataset_cfg is None or not dataset_cfg.ncore_json_paths:
+    if dataset_cfg is None or not getattr(dataset_cfg, "ncore_json_paths", None):  # PMT index: checked at load
         return
 
     from upath import UPath
@@ -143,6 +143,15 @@ def _load_model_state_dict(
     return state_dict
 
 
+def _load_checkpoint_state_dict(path: str) -> dict[str, torch.Tensor]:
+    """A weights-only .pth as released, or a fine-tune's Lightning .ckpt (``model.*`` keys; the training-only
+    learned sky and buffers are dropped by the caller's key filter)."""
+    if not path.endswith(".ckpt"):
+        return _load_model_state_dict(path)
+    state_dict = torch.load(path, map_location="cpu", weights_only=False)["state_dict"]
+    return {k[len("model."):]: v for k, v in state_dict.items() if k.startswith("model.")}
+
+
 def make(config: "InstantNuRecConfig") -> GaussiansInstantNuRecSystem:
     """Build the eager source model and load its pretrained weights.
 
@@ -157,20 +166,34 @@ def make(config: "InstantNuRecConfig") -> GaussiansInstantNuRecSystem:
     profile = pretrained.get_model_profile(config.release_profile)
     if include_dynamic and profile.decoder_kind != "pixel-aligned":
         raise ValueError("Dynamic inference requires a dense PA profile")
-    full_pt_path = _resolve_model_pt_path(config.release_profile)
-    if not full_pt_path or not os.path.exists(full_pt_path):
-        raise ModelNotFoundError(
-            f"{profile.filename} not found. Either set INSTANT_NUREC_FULL_PT to a "
-            f"local .pt path or ensure {pretrained.MODEL_REPO_ID!r} is reachable."
-        )
+    checkpoint_path = getattr(predict_config, "checkpoint_path", None)
+    if checkpoint_path is not None:
+        if not os.path.exists(checkpoint_path):
+            raise ModelNotFoundError(f"{checkpoint_path} not found.")
+        _preflight_validate_camera_ids(config)
+        logger.info("Loading model weights from %s.", checkpoint_path)
+        state_dict = _load_checkpoint_state_dict(checkpoint_path)
+        # rgb 3 + normal 3 + semantics: a fine-tune may carry the 8-class head
+        n_classes = state_dict["decoder.context_head.fusion_head.after_conv.2.bias"].shape[0] - 6
+        decoder = config.model.decoder.model_copy(update={"n_semantic_classes": n_classes})
+        static_core = KelvinStaticCore(config.model.model_copy(update={"decoder": decoder}))
+        keys = set(static_core.state_dict())
+        static_core.load_state_dict({k: v for k, v in state_dict.items() if k in keys}, strict=True)
+    else:
+        full_pt_path = _resolve_model_pt_path(config.release_profile)
+        if not full_pt_path or not os.path.exists(full_pt_path):
+            raise ModelNotFoundError(
+                f"{profile.filename} not found. Either set INSTANT_NUREC_FULL_PT to a "
+                f"local .pt path or ensure {pretrained.MODEL_REPO_ID!r} is reachable."
+            )
 
-    _preflight_validate_camera_ids(config)
-    logger.info("Loading source-model weights from %s.", full_pt_path)
-    static_core = KelvinStaticCore(config.model)
-    static_core.load_state_dict(
-        _load_model_state_dict(full_pt_path, expected_filename=profile.filename),
-        strict=True,
-    )
+        _preflight_validate_camera_ids(config)
+        logger.info("Loading source-model weights from %s.", full_pt_path)
+        static_core = KelvinStaticCore(config.model)
+        static_core.load_state_dict(
+            _load_model_state_dict(full_pt_path, expected_filename=profile.filename),
+            strict=True,
+        )
     # The checkpoint contains the training-time padding buffer. Restore the
     # inference override after loading so --cuboid-padding is not overwritten.
     static_core.decoder.cuboids_dims_padding.copy_(
@@ -183,13 +206,17 @@ def make(config: "InstantNuRecConfig") -> GaussiansInstantNuRecSystem:
 
     dataset_config = config.dataset.predict
     assert dataset_config is not None, "dataset.predict must be configured for inference"
+    if hasattr(dataset_config, "index_paths"):  # PMT index logs
+        expected_frames = len(dataset_config.camera_ids) * dataset_config.n_frames_per_sample
+    else:
+        expected_frames = (
+            len(dataset_config.context_camera_ids)
+            * dataset_config.frame_batch_sampler.n_frames_per_sample
+        )
     model = KelvinInferenceModel(
         static_core,
         scene_rescale=config.model.scene_rescale,
-        expected_frames=(
-            len(dataset_config.context_camera_ids)
-            * dataset_config.frame_batch_sampler.n_frames_per_sample
-        ),
+        expected_frames=expected_frames,
         expected_height=dataset_config.camera_subsampler.frame_height,
         expected_width=dataset_config.camera_subsampler.frame_width,
         include_dynamic=include_dynamic,

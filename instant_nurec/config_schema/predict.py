@@ -71,6 +71,11 @@ class PredictConfig(BaseConfigSchema):
     primitive_merge: PrimitiveMergeConfig = Field(
         default_factory=PrimitiveMergeConfig, description="Configuration for primitive merging"
     )
+    checkpoint_path: str | None = Field(
+        default=None,
+        description="Off: the released weights (INSTANT_NUREC_FULL_PT or Hugging Face). Set: these weights instead, "
+        "a weights-only .pth or a fine-tune's Lightning .ckpt; the semantic head width is read from the weights.",
+    )
     render_preview: bool = Field(
         default=False,
         description=(

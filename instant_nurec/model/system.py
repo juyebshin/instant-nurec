@@ -32,6 +32,7 @@ from instant_nurec.datasets.datamodule import InstantNuRecDataModule
 from instant_nurec.model.inference import KelvinInferenceModel
 from instant_nurec.predict.export_ply import export_ply
 from instant_nurec.predict.export_sky import export_sky
+from instant_nurec.predict.export_cameras import export_cameras
 from instant_nurec.predict.export_dynamic import export_dynamic
 from instant_nurec.predict.primitive_merge import KelvinPrimitiveMerge
 from instant_nurec.predict.render_preview import render_reference_preview
@@ -139,6 +140,7 @@ class GaussiansInstantNuRecSystem(nn.Module):
                 primitives=primitive,
                 rig_trajectories=rig,
                 path=path,
+                semantic_class="index_path" in meta,  # PMT index logs: per-Gaussian class for tools/viewer.py
             )
             sidecar_path, preview_path = export_sky(
                 cast(KelvinInstantNuRecPrimitive, primitive), rig, path
@@ -147,6 +149,9 @@ class GaussiansInstantNuRecSystem(nn.Module):
             print(f"Wrote 3DGS PLY ({n:,} gaussians): {path.resolve()}", flush=True)
             print(f"Wrote sky sidecar: {sidecar_path.resolve()}", flush=True)
             print(f"Wrote sky preview: {preview_path.resolve()}", flush=True)
+            if "index_path" in meta:  # PMT index log: context cameras for tools/viewer.py
+                cameras_path = export_cameras(context, rig, meta.get("world_origin"), path)
+                print(f"Wrote context cameras: {cameras_path.resolve()}", flush=True)
             if getattr(self.predict_config, "include_dynamic", False):
                 dynamic_path = export_dynamic(cast(KelvinInstantNuRecPrimitive, primitive), rig, path)
                 dynamic_count = sum(len(layer) for layer in primitive.dynamic_layers)
@@ -164,12 +169,17 @@ class GaussiansInstantNuRecSystem(nn.Module):
                 predict_dataset = self.datamodule.predict_dataset
                 if predict_dataset is None:
                     raise RuntimeError("Predict dataset is unavailable while exporting the calibrated video")
-                camera_id = predict_dataset.config.context_camera_ids[0]
-                full_camera_rig = predict_dataset.load_full_camera_rig(
-                    meta["ncore_json_path"],
-                    rig,
-                    camera_id=camera_id,
-                )
+                if "index_path" in meta:  # PMT index log
+                    full_camera_rig = predict_dataset.load_full_camera_rig(
+                        meta["index_path"], rig, camera_id=predict_dataset.config.camera_ids[0]
+                    )
+                else:
+                    camera_id = predict_dataset.config.context_camera_ids[0]
+                    full_camera_rig = predict_dataset.load_full_camera_rig(
+                        meta["ncore_json_path"],
+                        rig,
+                        camera_id=camera_id,
+                    )
                 video_stats = render_reference_video(
                     cast(KelvinInstantNuRecPrimitive, primitive),
                     full_camera_rig,

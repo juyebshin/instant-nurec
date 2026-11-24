@@ -1,0 +1,110 @@
+# Fine-tune of the released pa-multiview model on OpenScene alone (nuPlan, 8 cameras, 2 Hz), with the motion head
+# supervised by the annotated 3D boxes (2026-11-23). Same recipe as pmt_geo_av2_nusc_waymo.yaml (4 GPUs x batch 2,
+# lr 5.7e-5, 504x280 context and supervision, T=8 at 0.5 s, released init, 5-class head) except:
+#   (1) OpenScene only, on its geo "near" split (mapnn's; configs/splits/geo_near/openscene);
+#   (2) cuboid_tracks: the index's boxes become cuboid tracks, as for NCore data. Then (a) primitive_velocity
+#       trains the motion head: L1 between its 3D flow to the previous / next context frame and the boxes' flow
+#       at the MoGe-3 depth points (moving pixels only; vehicle pixels weighted 1, others 0.1), and (b) the dynamic
+#       layer is moved by the boxes, not the learned flow, for rendering. Every earlier PMT fine-tune had no
+#       tracks, so primitive_velocity was skipped there.
+#
+# Index tree: PseudoMapTrainer RoGS/output/inurec_finetune/index/geo/openscene/{train,val}, one pickle per geo run
+# (<log>_<first>-<last>), built by logs/export_openscene.sh; runs under 8 frames are not exported.
+# Train: 443 runs x 10 = 4430 samples / epoch = 554 steps on 4 GPUs x batch 2; 4 epochs = 2216 steps (the geo
+#   AV2 + nuScenes + Waymo run: 2576). Short and long runs get the same number of samples.
+# Val: 307 geo-val runs, one fixed sample each, 50 batches. There is no OpenScene geo-test list.
+#
+# Labels: depth = DVGT LiDAR-aligned MoGe-3 (moge3_vitl, num_tokens 2500) on every frame of the 240 lvpgh logs,
+# not yet filtered (the DVGT filter is running, 2026-11-23); semantics = M2F masks at
+# data/m2f/openscene/<log>/seg_<CAM>/<token>.png (Mask2Former/demo/inference_openscene.py), in the index once
+# re-exported (REEXPORT=1 logs/export_openscene.sh). Until then every frame has semantic_class 255: the semantic loss is skipped, the sky
+# cubemap gets no target, the vehicle weighting of primitive_velocity is flat 0.1, and the semantic head (whose
+# MOVABLE argmax picks the points a box may claim in the second association pass) is not trained.
+# Images are undistorted on load (index `distortion`; OpenScene k1 = -0.36), and raw-image masks with them; depth
+# (and masks predicted on DVGT's MoGe image, `seg_grid`) is resampled from DVGT's grid (`depth_grid`).
+seed: 38
+out_dir: checkpoints/training     # relative to the repo root (scripts/train_pmt_av2_nusc.sh cds there)
+phase: render
+reference_profile: full-model-front-v1
+
+logger:
+  name: csv
+  run_name: pmt-openscene-motion
+
+_sampling: &sampling
+  camera_subsampler: {frame_width: 504, frame_height: 280}
+  n_frames_per_sample: 8
+  frame_gap_us: 500000
+  semantic_remap: {5: 3, 6: 3, 7: 0}   # index LUT is 8-class: LANE, CROSSWALK -> ROAD; BOUNDARY -> OTHERS
+  cuboid_tracks: {}                    # on, NCore defaults: DYNAMIC if it travels > 1.5 m (or is a pedestrian /
+                                       # bicycle); boxes within +-1 s of the context span; self-boxes < 3 m skipped
+  supervision_frame_batch:
+    n_frames_per_camera: 1
+    prepend_timestamps_us: 100000
+    append_timestamps_us: 100000
+    sample_strategy: random
+    camera_subsampler: {frame_width: 504, frame_height: 280}
+    include_context_frames: true
+_openscene_cams: &openscene_cams [CAM_F0, CAM_L0, CAM_R0, CAM_L1, CAM_R1, CAM_L2, CAM_R2, CAM_B0]
+
+dataset:
+  train:
+    <<: *sampling
+    index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/geo/openscene/train]
+    camera_ids: *openscene_cams
+    n_samples_per_sequence: 10
+  val:
+    <<: *sampling
+    index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/geo/openscene/val]
+    camera_ids: *openscene_cams
+    n_samples_per_sequence: 1
+
+model:
+  freeze_encoder: false
+  init_weights_paths:
+    full: /home1/irteam/workspace/instant-nurec/checkpoints/pth/instant_nurec_pa_multiview_1.1.0.pth
+  init_full_keep_heads: true     # keeps the released Gaussian, affine and motion heads
+  post_processing:
+    enabled: true
+    optimization_start_global_step: 1000
+  decoder:
+    name: dpt-decoder
+    n_semantic_classes: 5          # released head as is; no widening
+
+system:
+  max_epochs: 4
+  train_batch_size: 2
+  val_batch_size: 2
+  train_num_workers: 16
+  val_num_workers: 4
+  precision: bf16-mixed
+  accelerator: gpu
+  devices: 4                     # DDP: launch with TORCH_NCCL_USE_COMM_NONBLOCKING=0 NCCL_COMM_BLOCKING=1
+  num_nodes: 1
+  strategy: auto
+  enable_render_global_step: 0
+  limit_val_batches: 50
+  log_every_n_steps: 10
+  save_every_n_train_steps: 500
+  checkpoint_monitor: val/psnr
+  checkpoint_mode: max
+  save_top_k: 2
+  optimizer:
+    lr: 5.7e-5                   # pilot's 2e-5 at batch 1, x sqrt(8) for total batch 8 (4 GPUs x 2)
+  scheduler:
+    warmup_steps: 500
+
+# As pmt_geo_av2_nusc_waymo.yaml. A render-phase loss block must list every weight (omitted ones become 0).
+loss:
+  primitive_sky_cubemap: 0.01
+  primitive_rgb: 0.1
+  primitive_distance: 1.0
+  primitive_distance_gradient: 1.0
+  primitive_semantics: 0.1
+  primitive_normal: 0.2
+  primitive_velocity: 1.0
+  rgb: 1.0
+  lpips: 0.2
+  distance: 0.1
+  background: 2.0
+  background_requires_semantics: true   # unmasked sky must not be a foreground target

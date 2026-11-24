@@ -13,11 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import TYPE_CHECKING
+
 from torch.utils.data import DataLoader
 
+from instant_nurec.config_schema.dataset import PMTIndexDatasetConfig
 from instant_nurec.config_schema.instantnurec import InstantNuRecConfig
 from instant_nurec.datasets.instantnurec_ncore import NCoreInstantNuRecDataset
 from instant_nurec.utils.batch import InstantNuRecDataBatch
+
+
+if TYPE_CHECKING:
+    from instant_nurec.datasets.pmt_index import PMTIndexDataset
 
 
 class InstantNuRecDataModule:
@@ -25,19 +32,24 @@ class InstantNuRecDataModule:
 
     def __init__(self, instantnurec_config: InstantNuRecConfig) -> None:
         self.instantnurec_config = instantnurec_config
-        self.predict_dataset: NCoreInstantNuRecDataset | None = None
+        self.predict_dataset: NCoreInstantNuRecDataset | PMTIndexDataset | None = None
 
     def predict_dataloader(self) -> DataLoader:
         dataset_config = self.instantnurec_config.dataset.predict
         assert dataset_config is not None, "dataset.predict has to be specified in the config to use the predict mode"
 
-        self.predict_dataset = NCoreInstantNuRecDataset(
-            dataset_config,
-            frame_width=dataset_config.camera_subsampler.frame_width,
-            frame_height=dataset_config.camera_subsampler.frame_height,
-            n_frames_per_sample=dataset_config.frame_batch_sampler.n_frames_per_sample,
-            global_seed=self.instantnurec_config.seed,
-        )
+        if isinstance(dataset_config, PMTIndexDatasetConfig):  # PMT index logs (AV2 / nuScenes / Waymo / OpenScene)
+            from instant_nurec.datasets.pmt_index import PMTIndexDataset
+
+            self.predict_dataset = PMTIndexDataset(dataset_config, global_seed=self.instantnurec_config.seed)
+        else:
+            self.predict_dataset = NCoreInstantNuRecDataset(
+                dataset_config,
+                frame_width=dataset_config.camera_subsampler.frame_width,
+                frame_height=dataset_config.camera_subsampler.frame_height,
+                n_frames_per_sample=dataset_config.frame_batch_sampler.n_frames_per_sample,
+                global_seed=self.instantnurec_config.seed,
+            )
         return DataLoader(
             self.predict_dataset,
             num_workers=self.instantnurec_config.system.predict_num_workers,

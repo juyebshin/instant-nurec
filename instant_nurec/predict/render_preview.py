@@ -282,22 +282,33 @@ def render_composited_frame(
     height, width = rays.shape[:2]
     world_rays = rays.to(device=device, dtype=torch.float32).contiguous()
     sensor_parameters = rendering.sensor_model_parameters[frame_index]
-    if not _looks_like_ftheta(sensor_parameters):
-        raise NotImplementedError(
-            "Calibrated rendering currently supports NCore F-theta cameras only; "
-            f"got {type(sensor_parameters).__name__}."
-        )
 
     rasterization = require_gsplat()
-    ftheta_coeffs, rolling_shutter, global_shutter = _ftheta_gsplat_parameters(sensor_parameters)
-    external_distortion_coeffs = _external_distortion_gsplat_parameters(sensor_parameters)
-    focal = float(sensor_parameters.angle_to_pixeldist_poly[1])
-    cx, cy = (float(value) for value in sensor_parameters.principal_point)
-    intrinsics = torch.tensor(
-        [[focal, 0.0, cx], [0.0, focal, cy], [0.0, 0.0, 1.0]],
-        dtype=torch.float32,
-        device=device,
-    )
+    if _looks_like_ftheta(sensor_parameters):
+        ftheta_coeffs, rolling_shutter, global_shutter = _ftheta_gsplat_parameters(sensor_parameters)
+        external_distortion_coeffs = _external_distortion_gsplat_parameters(sensor_parameters)
+        focal = float(sensor_parameters.angle_to_pixeldist_poly[1])
+        cx, cy = (float(value) for value in sensor_parameters.principal_point)
+        intrinsics = torch.tensor(
+            [[focal, 0.0, cx], [0.0, focal, cy], [0.0, 0.0, 1.0]],
+            dtype=torch.float32,
+            device=device,
+        )
+        camera_kwargs = {
+            "camera_model": "ftheta",
+            "ftheta_coeffs": ftheta_coeffs,
+            "external_distortion_coeffs": external_distortion_coeffs,
+            "rolling_shutter": rolling_shutter,
+        }
+    else:  # OpenCV pinhole / fisheye (PMT index logs), as the training renderer
+        from instant_nurec.training.renderer import _camera_kwargs
+
+        intrinsics, camera_kwargs = _camera_kwargs(sensor_parameters, device)
+        global_shutter = camera_kwargs.pop("_global_shutter")
+        rolling_shutter = camera_kwargs["rolling_shutter"]
+        for name in ("radial_coeffs", "tangential_coeffs"):  # (1, 1, n) for its batched call; one camera here
+            if name in camera_kwargs:
+                camera_kwargs[name] = camera_kwargs[name][0]
     camera_to_world_start = tquat_to_se3_matrix(
         rendering.poses_tquat_startend[frame_index, 0],
         unbatch=True,
@@ -328,7 +339,6 @@ def render_composited_frame(
         far_plane=torch.finfo(torch.float32).max,
         sh_degree=None,
         render_mode="RGB",
-        camera_model="ftheta",
         packed=False,
         with_ut=True,
         ut_params=_reference_ut_parameters(),
@@ -336,10 +346,8 @@ def render_composited_frame(
         with_eval3d=True,
         global_z_order=False,
         rays=world_rays.unsqueeze(0),
-        ftheta_coeffs=ftheta_coeffs,
-        external_distortion_coeffs=external_distortion_coeffs,
-        rolling_shutter=rolling_shutter,
         viewmats_rs=(world_to_camera_end.unsqueeze(0) if rolling_shutter != global_shutter else None),
+        **camera_kwargs,
     )
     foreground = rendered_rgb[0, ..., :3]
     opacity = rendered_alpha[0, ..., 0]

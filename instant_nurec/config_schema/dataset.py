@@ -232,7 +232,20 @@ class PMTIndexDatasetConfig(BaseConfigSchema):
         description="Class -> class, applied after the index's semantic_lut (unlisted classes and 255 unchanged). "
         "{5: 3, 6: 3, 7: 0} trains the released 5-class head: LANE, CROSSWALK -> ROAD, BOUNDARY -> OTHERS",
     )
+    cuboid_tracks: NCoreInstantNuRecCuboidTracksParamsConfig | None = Field(
+        default=None,
+        description="Off by default. Set: build cuboid tracks from the index's annotated boxes (OpenScene) as the NCore "
+        "loader does, which supervises the motion head (primitive_velocity) and moves the dynamic layer by the boxes. "
+        "track_label_source is unused (index boxes are annotations).",
+    )
     supervision_frame_batch: SupervisionFrameBatchConfig = Field(default_factory=SupervisionFrameBatchConfig)
+    frame_batch_sampler: AdaptiveSequentialFrameBatchSamplerConfig | None = Field(
+        default=None,
+        description="Off (training: one random n_frames_per_sample chain per sample, frame_gap_us apart). Set "
+        "(predict, run_inference --index-path): each log is split into sequential chunks that cover it, as the NCore "
+        "predict loader does (its n_samples_per_sequence = max chunks; n_frames_per_sample stays this config's), and "
+        "the world origin moves to the log's first rig pose so exported float32 positions stay precise.",
+    )
 
 
 class NCoreMixtureComponentConfig(BaseConfigSchema):
@@ -258,4 +271,6 @@ class InstantNuRecSplitsConfig(BaseConfigSchema):
 
     train: NCoreTrainDatasetConfig | None = Field(default=None, description="Dataset used for training")
     val: NCoreTrainDatasetConfig | None = Field(default=None, description="Dataset used for validation")
-    predict: NCoreInstantNuRecDatasetConfig | None = Field(default=None, description="Dataset to use in prediction mode")
+    predict: NCoreInstantNuRecDatasetConfig | PMTIndexDatasetConfig | None = Field(
+        default=None, description="Dataset to use in prediction mode (PMT index logs: frame_batch_sampler set)"
+    )
