@@ -154,6 +154,11 @@ page: a reduced size while the camera moves, then full size once it rests.
   class, depth and opacity.
 - Controls: per-class visibility, the dynamic layer at a time slider (with play), and context-camera frustums.
   Clicking a frustum looks through that frame, setting its pose, FoV, time and ISP camera.
+- Ego trajectory: `.cameras.npz` carries the rig poses the chunks were built on (`ego_T_world`,
+  `ego_timestamps_us`, PLY frame; exports from 2026-11-24 on). The viewer draws them as a line, with the part
+  up to the time slider highlighted. The ego at that time is a box + axes; the box is a nominal 4.6 × 1.9 ×
+  1.6 m car, 1.4 m ahead of the ego origin (rear axle on the ground). Older files fall back to the first
+  camera's path.
 - Semantic colours need the `semantic_class` attribute, which `--index-path` runs write. NCore PLYs carry only
   road / sky masks.
 - Cost per view (2026-11-24, OpenScene scene, 2.0 M static + 8.7 M dynamic Gaussians, shared H200): render,

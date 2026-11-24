@@ -10,6 +10,9 @@ Reads ``<scene>.ply`` and, when they sit next to it, ``.sky.npz`` (sky cubemap +
 
 then open http://localhost:8080 (through ``ssh -L 8080:localhost:8080 <host>`` from another machine).
 
+The ego trajectory (``.cameras.npz``) is drawn with the ego at the time slider's value as a box + axes; the
+traversed part of the trajectory is highlighted.
+
 Render modes: rgb (Gaussians over the sky, through the chosen camera's ISP affine, as the model renders), rgb
 without sky, semantic class (the PLY's ``semantic_class`` from ``--index-path`` runs; otherwise only its road / sky
 masks), depth (ray distance) and opacity. Click a context-camera frustum to look through it: the view, time and
@@ -148,6 +151,33 @@ class Scene:
             stamps = np.zeros(1, np.int64)
         self.t0, self.t1 = int(stamps.min()), int(stamps.max())
 
+        # ego trajectory: the rig poses of the export (.cameras.npz ego_T_world, 2026-11-24 on); older files fall
+        # back to the first camera's path, turned to ego axes (x forward, z up)
+        self.ego_t = self.ego_T = None
+        self.ego_source = None
+        if self.cameras is not None and "ego_T_world" in self.cameras:
+            self.ego_t, self.ego_T = self.cameras["ego_timestamps_us"], self.cameras["ego_T_world"]
+            self.ego_source = "ego (rig) poses"
+        elif self.cameras is not None:
+            first = self.cameras["camera"] == self.cameras["camera"][0]
+            order = np.argsort(self.cameras["timestamps_us"][first])
+            self.ego_t = self.cameras["timestamps_us"][first][order]
+            c2w = self.cameras["c2w"][first][order]
+            self.ego_T = c2w.copy()
+            self.ego_T[:, :3, :3] = np.stack([c2w[:, :3, 2], -c2w[:, :3, 0], -c2w[:, :3, 1]], -1)
+            self.ego_source = f"{self.cameras['camera'][0]} path (re-export for ego poses)"
+
+    def ego_pose(self, t_us: int) -> np.ndarray:
+        """Ego -> world at ``t_us``: linear in position, slerp in rotation, clamped to the trajectory."""
+        t, T = self.ego_t, self.ego_T
+        j = int(np.clip(np.searchsorted(t, t_us), 1, len(t) - 1))
+        a = float(np.clip((t_us - t[j - 1]) / max(t[j] - t[j - 1], 1), 0.0, 1.0))
+        R0, R1 = vtf.SO3.from_matrix(T[j - 1, :3, :3]), vtf.SO3.from_matrix(T[j, :3, :3])
+        out = np.eye(4)
+        out[:3, :3] = (R0 @ vtf.SO3.exp(a * (R0.inverse() @ R1).log())).as_matrix()
+        out[:3, 3] = (1 - a) * T[j - 1, :3, 3] + a * T[j, :3, 3]
+        return out
+
 
 class Renderer:
     def __init__(self, scene: Scene):
@@ -272,14 +302,21 @@ class Viewer:
         self.affine = gui.add_dropdown("ISP camera", tuple(scene.affine_names), initial_value=scene.affine_names[0])
         self.dynamic = gui.add_checkbox("dynamic layer", initial_value=n_dynamic > 0, disabled=n_dynamic == 0)
         span = max((scene.t1 - scene.t0) / 1e6, 0.05)
-        self.time = gui.add_slider("time [s]", min=0.0, max=span, step=0.05, initial_value=0.0,
-                                   disabled=n_dynamic == 0)
-        self.play = gui.add_checkbox("play", initial_value=False, disabled=n_dynamic == 0)
+        timed = n_dynamic > 0 or scene.ego_t is not None
+        self.time = gui.add_slider("time [s]", min=0.0, max=span, step=0.05, initial_value=0.0, disabled=not timed)
+        self.play = gui.add_checkbox("play", initial_value=False, disabled=not timed)
+        # the dynamic layer is MOVABLE, so MOVABLE gets a box whenever there is one, even with no static MOVABLE
+        # Gaussians (AV2 / nuScenes / Waymo send them all to the dynamic layer)
+        movable = int(KelvinSemanticClass.MOVABLE)
+        classes = sorted(set(scene.classes) | ({movable} if n_dynamic > 0 else set()))
         with gui.add_folder("classes"):
             self.class_boxes = {
-                c: gui.add_checkbox(f"{c} {KelvinSemanticClass(c).name}" if c in KelvinSemanticClass._value2member_map_
-                                    else str(c), initial_value=True)
-                for c in scene.classes
+                c: gui.add_checkbox(
+                    (f"{c} {KelvinSemanticClass(c).name}" if c in KelvinSemanticClass._value2member_map_ else str(c))
+                    + (" (+ dynamic layer)" if c == movable and n_dynamic > 0 else ""),
+                    initial_value=True,
+                )
+                for c in classes
             }
         for handle in (self.mode, self.affine, self.dynamic, self.time, self.near):
             handle.on_update(lambda _: self.mark_all())
@@ -294,6 +331,12 @@ class Viewer:
             self.occlude = gui.add_checkbox("frustums behind geometry", initial_value=False)
             self.occlude.on_update(lambda _: self.mark_all())
             self._add_frustums()
+        self.show_ego = None
+        if scene.ego_t is not None:
+            self.show_ego = gui.add_checkbox("ego trajectory", initial_value=True, hint=scene.ego_source)
+            self.show_ego.on_update(lambda _: self._set_ego_visible(self.show_ego.value))
+            self._add_ego()
+            self.time.on_update(lambda _: self.update_ego())
         self.stats = gui.add_text("last frame", initial_value="", disabled=True)
         self.server.on_client_connect(self.on_connect)
         self.server.on_client_disconnect(lambda client: self.clients.pop(client.client_id, None))
@@ -312,6 +355,41 @@ class Viewer:
             )
             handle.on_click(lambda event, i=i: self.snap(event.client, i))
             self.frustums.append(handle)
+
+    EGO_BOX = (4.6, 1.9, 1.6)  # nominal car, l / w / h [m]
+    EGO_BOX_CENTRE = (1.4, 0.0, 0.8)  # in the ego frame (origin ~ rear axle on the ground, x forward, z up)
+    PAST, FUTURE = (255, 140, 0), (150, 150, 150)
+
+    def _add_ego(self) -> None:
+        """The trajectory as a line (traversed part highlighted) and the ego at the current time as a box + axes."""
+        s = self.scene
+        keep = np.unique(np.linspace(0, len(s.ego_t) - 1, min(len(s.ego_t), 1500)).round().astype(int))
+        self.ego_line_t = s.ego_t[keep]
+        p = s.ego_T[keep, :3, 3] + np.array([0.0, 0.0, 0.05])  # just above the road
+        self.ego_line = self.server.scene.add_line_segments(
+            "/ego/trajectory", points=np.stack([p[:-1], p[1:]], 1),
+            colors=np.tile(np.array(self.FUTURE, np.uint8), (len(p) - 1, 2, 1)), thickness=0.15,
+        )
+        self.ego_frame = self.server.scene.add_frame("/ego/current", axes_length=2.5, axes_radius=0.08)
+        self.server.scene.add_box("/ego/current/box", color=(255, 60, 60), dimensions=self.EGO_BOX,
+                                  position=self.EGO_BOX_CENTRE, opacity=0.6)
+        self.update_ego()
+
+    def update_ego(self) -> None:
+        """Move the ego marker to the time slider and colour the traversed part of the trajectory."""
+        if self.show_ego is None:
+            return
+        t_us = self.scene.t0 + int(self.time.value * 1e6)
+        T = self.scene.ego_pose(t_us)
+        self.ego_frame.wxyz = vtf.SO3.from_matrix(T[:3, :3]).wxyz
+        self.ego_frame.position = T[:3, 3]
+        past = self.ego_line_t[1:] <= t_us
+        colors = np.where(past[:, None, None], np.array(self.PAST, np.uint8), np.array(self.FUTURE, np.uint8))
+        self.ego_line.colors = np.ascontiguousarray(np.broadcast_to(colors, (len(past), 2, 3)))
+
+    def _set_ego_visible(self, visible: bool) -> None:
+        self.ego_line.visible = visible
+        self.ego_frame.visible = visible
 
     def _set_frustums_visible(self, visible: bool) -> None:
         for handle in self.frustums:
@@ -332,7 +410,8 @@ class Viewer:
     def update_classes(self) -> None:
         on = {c for c, box in self.class_boxes.items() if box.value}
         self.renderer.set_classes(on)
-        self.renderer.show_movable = int(KelvinSemanticClass.MOVABLE) in on
+        movable = self.class_boxes.get(int(KelvinSemanticClass.MOVABLE))
+        self.renderer.show_movable = movable is None or movable.value
         self.mark_all()
 
     # ------------------------------------------------------------------ clients
