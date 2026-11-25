@@ -34,13 +34,13 @@ dataset:
       av2:
         config:
           <<: *sampling
-          index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/av2/train]
+          index_paths: [/home1/irteam/workspace/instant-nurec/data/index/av2/train]
           camera_ids: *av2_cams
           n_samples_per_sequence: 10
       nusc:
         config:
           <<: *sampling
-          index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/nusc/train]
+          index_paths: [/home1/irteam/workspace/instant-nurec/data/index/nusc/train]
           camera_ids: *nusc_cams
           n_samples_per_sequence: 7
   val:
@@ -49,14 +49,14 @@ dataset:
         sample_ratio: 0.25        # 25 of 101 val logs
         config:
           <<: *sampling
-          index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/av2/val]
+          index_paths: [/home1/irteam/workspace/instant-nurec/data/index/av2/val]
           camera_ids: *av2_cams
           n_samples_per_sequence: 1
       nusc:
         sample_ratio: 0.17        # 25 of 150 val scenes
         config:
           <<: *sampling
-          index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/nusc/val]
+          index_paths: [/home1/irteam/workspace/instant-nurec/data/index/nusc/val]
           camera_ids: *nusc_cams
           n_samples_per_sequence: 1
 

@@ -29,12 +29,12 @@ _openscene_cams: &openscene_cams [CAM_F0, CAM_L0, CAM_R0, CAM_L1, CAM_R1, CAM_L2
 dataset:
   train:
     <<: *sampling
-    index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/geo/openscene/train/2021.05.12.19.36.12_veh-35_00215_00405_0-379.pkl]
+    index_paths: [/home1/irteam/workspace/instant-nurec/data/index/geo/openscene/train/2021.05.12.19.36.12_veh-35_00215_00405_0-379.pkl]
     camera_ids: *openscene_cams
     n_samples_per_sequence: 4
   val:
     <<: *sampling
-    index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/geo/openscene/train/2021.05.12.19.36.12_veh-35_00215_00405_0-379.pkl]
+    index_paths: [/home1/irteam/workspace/instant-nurec/data/index/geo/openscene/train/2021.05.12.19.36.12_veh-35_00215_00405_0-379.pkl]
     camera_ids: *openscene_cams
     n_samples_per_sequence: 1
 

@@ -8,8 +8,8 @@
 #       layer is moved by the boxes, not the learned flow, for rendering. Every earlier PMT fine-tune had no
 #       tracks, so primitive_velocity was skipped there.
 #
-# Index tree: PseudoMapTrainer RoGS/output/inurec_finetune/index/geo/openscene/{train,val}, one pickle per geo run
-# (<log>_<first>-<last>), built by logs/export_openscene.sh; runs under 8 frames are not exported.
+# Index tree: data/index/geo/openscene/{train,val}, one pickle per geo run
+# (<log>_<first>-<last>), built by scripts/index/export_openscene.sh; runs under 8 frames are not exported.
 # Train: 443 runs x 10 = 4430 samples / epoch = 554 steps on 4 GPUs x batch 2; 4 epochs = 2216 steps (the geo
 #   AV2 + nuScenes + Waymo run: 2576). Short and long runs get the same number of samples.
 # Val: 307 geo-val runs, one fixed sample each, 50 batches. There is no OpenScene geo-test list.
@@ -17,7 +17,7 @@
 # Labels: depth = DVGT LiDAR-aligned MoGe-3 (moge3_vitl, num_tokens 2500) on every frame of the 240 lvpgh logs,
 # not yet filtered (the DVGT filter is running, 2026-11-23); semantics = M2F masks at
 # data/m2f/openscene/<log>/seg_<CAM>/<token>.png (Mask2Former/demo/inference_openscene.py), in the index once
-# re-exported (REEXPORT=1 logs/export_openscene.sh). Until then every frame has semantic_class 255: the semantic loss is skipped, the sky
+# re-exported (REEXPORT=1 scripts/index/export_openscene.sh). Until then every frame has semantic_class 255: the semantic loss is skipped, the sky
 # cubemap gets no target, the vehicle weighting of primitive_velocity is flat 0.1, and the semantic head (whose
 # MOVABLE argmax picks the points a box may claim in the second association pass) is not trained.
 # Images are undistorted on load (index `distortion`; OpenScene k1 = -0.36), and raw-image masks with them; depth
@@ -50,12 +50,12 @@ _openscene_cams: &openscene_cams [CAM_F0, CAM_L0, CAM_R0, CAM_L1, CAM_R1, CAM_L2
 dataset:
   train:
     <<: *sampling
-    index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/geo/openscene/train]
+    index_paths: [/home1/irteam/workspace/instant-nurec/data/index/geo/openscene/train]
     camera_ids: *openscene_cams
     n_samples_per_sequence: 10
   val:
     <<: *sampling
-    index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/geo/openscene/val]
+    index_paths: [/home1/irteam/workspace/instant-nurec/data/index/geo/openscene/val]
     camera_ids: *openscene_cams
     n_samples_per_sequence: 1
 

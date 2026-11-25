@@ -166,7 +166,7 @@ Launch anything longer than ~2 minutes detached (`setsid nohup … > log 2>&1 &`
 
 | Where | What |
 |---|---|
-| `../PseudoMapTrainer/RoGS/scripts/inurec_finetune_index.py` | writes the index pickles `PMTIndexDataset` reads; runs in `sjy-rogs` (AV2 / nuScenes devkits) |
+| `../PseudoMapTrainer/RoGS/output/inurec_finetune/index` | symlink to `data/index`. The index exporter moved here on 2026-11-25 (`tools/index_export/`, `scripts/index/`); PMT's copy is superseded |
 | `../PseudoMapTrainer/RoGS/scripts/inurec_road_{run,test}.py` | road Gaussians for RoGS init, and the road test (dz, IoU vs LiDAR) |
 | `../PseudoMapTrainer/RoGS/output/inurec_finetune/` | indexes, runs and checkpoints of the fine-tune |
 | `../mapnn/tools/analysis_tools/inurec_{zeroshot_diag,zeroshot_run,render_eval}.py` | geometry vs LiDAR per rig; next-frame render eval |

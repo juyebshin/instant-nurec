@@ -15,10 +15,11 @@ label table.
 
 ## Standing facts
 
-- **One loader.** New sources go through a new branch in
-  `../PseudoMapTrainer/RoGS/scripts/inurec_finetune_index.py`, not a new dataset class here.
-- **The exporter runs in `sjy-rogs`** (dataset devkits). This repo runs in `sjy-inurec`, which has no
-  devkits. Do not try to import AV2 / nuScenes / DDAD devkits here.
+- **One loader.** New sources go through a new branch in `tools/index_export/export_index.py` (+ a
+  `scripts/index/export_<dataset>.sh`), not a new dataset class here.
+- **The exporter runs in `sjy-inurec`** since 2026-11-25 (av2 0.2.1 and nuscenes-devkit 1.1.11 installed
+  `--no-deps`; `tools/index_export/README.md`). A new devkit is a dependency change: dry-run it, and never let
+  it replace an installed package (e.g. `opencv-python` over the env's `opencv-python-headless`).
 - **The depth labels** are DVGT's LiDAR-aligned MoGe-3: `../DVGT/public_datasets/data_annotation_moge3/align_depth`,
   filtered by `../DVGT/data_annotation/meta/moge3_vitl/moge_pred_filter_parquet`. They are
   log-encoded uint16 **camera-z** PNGs; the loader converts them to ray distance.
@@ -33,7 +34,7 @@ label table.
 1. **Read the source.** Find its camera models, its pose and timestamp conventions and the T_cam_ego
    direction, and check which frames have depth labels. Write down the frame conventions before
    writing code.
-2. **Export one log** into a scratch index directory, not into `inurec_finetune/index/<dataset>/`.
+2. **Export one log** into a scratch index directory, not into `data/index/<dataset>/`.
 3. **Load it here** with `PMTIndexDataset` (the snippet in `inurec-data`). Print the camera count, the
    resolution, the context timestamps (0.5 s apart?), the depth range in metres and the semantic
    histogram.

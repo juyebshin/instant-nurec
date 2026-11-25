@@ -208,8 +208,8 @@ class NCoreInstantNuRecDatasetConfig(BaseConfigSchema):
 
 
 class PMTIndexDatasetConfig(BaseConfigSchema):
-    """Non-NCore logs (AV2 / nuScenes / Waymo) from per-log index pickles written by
-    PseudoMapTrainer ``RoGS/scripts/inurec_finetune_index.py``.
+    """Non-NCore logs (AV2 / nuScenes / Waymo / OpenScene) from per-log index pickles written by
+    ``tools/index_export/export_index.py`` (``data/index/``).
 
     Context: ``n_frames_per_sample`` frames of every camera, ``frame_gap_us`` apart on the
     first camera's timeline, other cameras at their nearest frame. Supervision: as

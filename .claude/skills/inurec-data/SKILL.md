@@ -17,8 +17,9 @@ exporter branch in PMT, not a new dataset class here.
 
 ## The PMT index
 
-The pickles are written by `../PseudoMapTrainer/RoGS/scripts/inurec_finetune_index.py` in env
-`sjy-rogs`, which has the AV2 / nuScenes devkits that `sjy-inurec` lacks. One pickle per log:
+The pickles are written by `tools/index_export/export_index.py` (batch: `scripts/index/export_*.sh`) in
+`sjy-inurec`, into `data/index/`. Before 2026-11-25 this was PMT `RoGS/scripts/inurec_finetune_index.py` in
+`sjy-rogs`; the old index path is a symlink to `data/index`. One pickle per log:
 
 ```
 cameras: {name: {K, wh, T_cam_ego}}             # OpenCV camera frame
@@ -44,7 +45,7 @@ Conventions that `PMTIndexDataset` relies on. Check all of them for a new source
 - **Normals** are derived from depth in `KelvinInstantNuRec.prepare_context`.
 
 AV2 today: 695 logs with MoGe-3 depth, split 491 / 101 / 103 into train / val / test under
-`../PseudoMapTrainer/RoGS/output/inurec_finetune/index/av2/{train,val,test}`. **The test split is
+`data/index/av2/{train,val,test}` (`scripts/index/av2_logs.txt`). **The test split is
 held out.**
 
 ## Labels available per dataset

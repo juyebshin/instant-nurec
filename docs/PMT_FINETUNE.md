@@ -25,11 +25,16 @@ rigs, whose Gaussians initialise RoGS road reconstruction in PseudoMapTrainer (P
 | `config_schema/dataset.py`, `datasets/pmt_index.py` | `PMTIndexDatasetConfig.cuboid_tracks` (default off, 2026-11-23): an index's annotated boxes (`tracks`) become cuboid tracks as in `NCoreInstantNuRecDataset._compute_cuboid_tracks`, which turns on the upstream motion supervision (`primitive_velocity`) and box-driven dynamic layers. |
 | `configs/training/pmt_openscene_motion.yaml`, `pmt_openscene_motion_smoke.yaml` (new) | OpenScene-only fine-tune on its geo split with the motion head supervised by the boxes, and its smoke. |
 | `cli.py`, `model/__init__.py`, `model/system.py`, `datasets/datamodule.py`, `datasets/pmt_index.py`, `config_schema/{dataset,predict}.py`, `predict/{export_ply,export_cameras,render_preview}.py` | `run_inference.py --index-path` (2026-11-24): index logs through the NCore predict path (chunking, merge, PLY / sky / dynamic export, preview, video); `--checkpoint` runs a `.pth` or a fine-tune's Lightning `.ckpt`. Index runs also write `.cameras.npz` and a per-Gaussian `semantic_class` PLY attribute. NCore runs are unchanged. Details below. |
+| `tools/index_export/`, `scripts/index/` (new, 2026-11-25) | The index exporter and its batch scripts, moved from PMT (logic unchanged; runs in `sjy-inurec`); the semantic LUT as a table. The index tree is `data/index/`. |
 | `tools/viewer.py` (new) | nerfstudio-style viser viewer of an exported scene, rendered on the GPU with the model's 3DGUT renderer. |
 
-**Index pickles.** These are written by PMT `RoGS/scripts/inurec_finetune_index.py`, which runs
-in env `sjy-rogs` because that env has the AV2 and nuScenes devkits; this env does not. The
-exporter handles AV2, nuScenes, (2026-11-21) Waymo and (2026-11-23) OpenScene.
+**Index pickles.** Step by step from raw downloads: `docs/prepare_data.md`. These are written by
+`tools/index_export/export_index.py` (README there) into
+`data/index/`, with the batch scripts in `scripts/index/`. The exporter handles AV2, nuScenes, (2026-11-21)
+Waymo and (2026-11-23) OpenScene. Until 2026-11-25 it was PMT `RoGS/scripts/inurec_finetune_index.py`, run in
+`sjy-rogs`, and the tree was PMT `RoGS/output/inurec_finetune/index` (now a symlink to `data/index`). The move
+changed no pickle: all 4646 in use were re-exported with the moved code and compared field by field; they are
+identical except OpenScene box rotations, which differ by ≤ 4.4e-16 (numpy 1.26 vs 1.24).
 
 ```
 cameras: {name: {K, wh, T_cam_ego}}             # OpenCV camera frame
@@ -54,14 +59,15 @@ semantic_lut: (256,) uint8                      # Mapillary Vistas v2 id -> Kelv
   nuScenes have them. Waymo masks come from PMT `Mask2Former/demo/inference_waymo.py` (in progress
   2026-11-21) into `PMT/data/m2f_infer_waymo/<segment>/seg_<camera>/<t_us>.png`, predicted on the raw
   distorted jpgs; the loader undistorts them nearest-neighbour onto the image grid. Until a segment's
-  masks exist (then `logs/export_geo.sh` with `REEXPORT_WAYMO=1`), its frames carry `semantic_class` 255.
+  masks exist (then `scripts/index/export_geo.sh` with `REEXPORT_WAYMO=1`), its frames carry `semantic_class` 255.
 - **Coverage:** depth exists only on 2 Hz keyframes. `context_requires_depth` draws context
   frames from those.
 
 AV2 index: 695 logs with MoGe-3 depth, split 491 / 101 / 103 into train / val / test under
-`PseudoMapTrainer/RoGS/output/inurec_finetune/index/av2/{train,val,test}`. Test is held out. These 695
+`data/index/av2/{train,val,test}` (list: `scripts/index/av2_logs.txt`). Test is held out. These 695
 are exactly the AV2 geo-train logs. DVGT added depth for the other 305 logs on 2026-11-20 (same 2 Hz
-keyframes), so all 1000 AV2 logs now have it.
+keyframes), so all 1000 AV2 logs now have it; `export_av2.sh` still exports only the listed 695, because
+`pmt_av2_pilot.yaml` and `pmt_av2_nusc.yaml` read these directories whole.
 
 nuScenes index (2026-11-20, `logs/export_nusc_all.sh`): the official v1.0-trainval split, 700 train / 150 val
 scenes under `.../index/nusc/{train,val}`. Every keyframe has MoGe-3 depth (DVGT's filter lists keep all
@@ -85,13 +91,13 @@ differ from AV2 / nuScenes:
   same static-extrinsic convention. Rolling shutter is not modelled.
 Checked on one segment: depth overlaid on the undistorted images lines up at pole, tree, car and wall edges.
 
-Geo-split tree (2026-11-21, `logs/export_geo.sh`): `.../index/geo/{av2,nusc,waymo}/{train,val}`, from the
+Geo-split tree (2026-11-21, `scripts/index/export_geo.sh`): `.../index/geo/{av2,nusc,waymo}/{train,val}`, from the
 "near" lists, copied to `configs/splits/geo_near/` (README there: PMT's AV2 / nuScenes lists, identical to
 mapnn's, and mapnn's Waymo list, commit 8ef6637). AV2 695 / 150; nuScenes 554 / 99 (the lists name
 657 / 124, but 103 / 25 of those scenes are from the official test split, which has no MoGe depth); Waymo
 700 / 151. AV2 geo-train and nuScenes are symlinks to the pickles above; geo-test is not indexed.
 
-OpenScene index (2026-11-23, `logs/export_openscene.sh`, for `pmt_openscene_motion.yaml`): `data/openscene` →
+OpenScene index (2026-11-23, `scripts/index/export_openscene.sh`, for `pmt_openscene_motion.yaml`): `data/openscene` →
 `/home1/irteam/data/openscene` (NAVSIM log pickles, 2 Hz, 8 cameras at 1920×1080). The unit is a geo-split run
 `<log>:<first>-<last>` (mapnn's OpenScene "near" list, copied to `configs/splits/geo_near/openscene`; runs cut
 logs, ≥ 70 m between train and val frames), one pickle per run; runs under 8 frames are not exported, leaving
@@ -108,7 +114,7 @@ logs, ≥ 70 m between train and val frames), one pickle per run; runs under 8 f
   `seg_grid` (= `depth_grid`) and the loader resamples masks like depth (255 outside DVGT's crop, ~7% of the
   frame). Any other size fails the export. The MoGe-grid case was checked on one run from the first mask pass
   (masks line up with the undistorted images at cars, poles, kerbs and paint). The index picks masks up on
-  re-export (`REEXPORT=1 logs/export_openscene.sh`).
+  re-export (`REEXPORT=1 scripts/index/export_openscene.sh`).
 - **Boxes:** NAVSIM `anns` (x, y, z, l, w, h, yaw in the lidar frame, which equals the ego frame here, plus
   `track_tokens`), stored per track as box → world poses. Checked on one run: lifted MoGe-3 points fall inside
   the vehicle boxes 1.6–1.9× more often with the true yaw than with yaw + 90°, so boxes, calibration and
@@ -140,7 +146,7 @@ directories of them) instead of `--ncore-path` and runs them through the same pr
 
 ```bash
 INSTANT_NUREC_RUN_ID=geo-2576 CUDA_VISIBLE_DEVICES=0 python run_inference.py --model pa-multiview \
-  --index-path ../PseudoMapTrainer/RoGS/output/inurec_finetune/index/geo/waymo/val/10226164909075980558_180_000_200_000.pkl \
+  --index-path data/index/geo/waymo/val/10226164909075980558_180_000_200_000.pkl \
   --checkpoint checkpoints/training/pmt-geo-av2-nusc-waymo-2ep/checkpoints/last.ckpt \
   --n-frames 8 --max-frame-gap-us 500000 --max-chunks 12 --output-dir outputs/predict \
   --merge --include-dynamic --render-preview
@@ -503,7 +509,7 @@ comparable with theirs. Same recipe as `pmt_av2_nusc.yaml` except: geo splits; W
   (it used to return NaN on an all-ignore target) and trains no sky cubemap. Without
   `background_requires_semantics` the background loss would treat Waymo sky as foreground (target opacity
   1) and push the model to paint the sky. Once `inference_waymo.py` has run, re-export the Waymo pickles
-  (`REEXPORT_WAYMO=1 logs/export_geo.sh`) and Waymo trains semantics and sky like AV2; the flag then only
+  (`REEXPORT_WAYMO=1 scripts/index/export_geo.sh`) and Waymo trains semantics and sky like AV2; the flag then only
   matters for frames without a mask. A run started before the re-export keeps the mask-less pickles.
 - **Waymo is no longer a held-out rig.** HRDX still is. Waymo geo-test (149 segments) stays held out by
   log, and mapnn's zero-shot Waymo number is now in-domain for this model.

@@ -59,7 +59,7 @@ export TORCH_NCCL_USE_COMM_NONBLOCKING=0 NCCL_COMM_BLOCKING=1   # multi-GPU: wit
 | `ModelCheckpointError … legacy traced-model archive` | wrong artifact for `INSTANT_NUREC_FULL_PT` |
 | `Error(s) in loading state_dict` loading a fine-tune into the CLI | the CLI expects the released 5-class weights-only file. Load fine-tunes the way PMT `inurec_road_run.py` does |
 | `apex` warning at startup | expected: `optimizer.implementation: auto` falls back to `torch.optim.Adam` |
-| `ModuleNotFoundError: av2` / `nuscenes` | expected in this env. Exporters run in `sjy-rogs` |
+| `ModuleNotFoundError: av2` / `nuscenes` | installed 2026-11-25 for `tools/index_export` (`--no-deps`, README there); reinstall with that recipe, not a plain `pip install`, which would pull `opencv-python` over the env's headless `cv2` |
 
 ## Before proposing a dependency change
 

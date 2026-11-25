@@ -13,8 +13,7 @@ description: HD-map uses of Instant NuRec Gaussians — road-surface and road-ma
    - The released 5-class head is widened by `_widen_semantic_head` (`training/system.py`). LANE and
      CROSSWALK start from the ROAD row and BOUNDARY from the OTHERS row, all with bias −2, so the
      argmax at step 0 is unchanged.
-2. **Labels.** M2F Mapillary-v2 masks, mapped by the index `semantic_lut` (built in PMT
-   `inurec_finetune_index.py`), with 255 = ignore. They exist only for AV2 and nuScenes.
+2. **Labels.** M2F Mapillary-v2 masks, mapped by the index `semantic_lut` (`tools/index_export/semantic_lut.py`), with 255 = ignore. They exist only for AV2 and nuScenes.
 3. **Road Gaussians.**
    - PMT `inurec_road_run.py` runs non-overlapping T=8 windows over a whole log.
    - It keeps every pixel-aligned Gaussian whose semantic argmax is ROAD, in the RoGS world frame

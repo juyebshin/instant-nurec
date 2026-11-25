@@ -28,12 +28,12 @@ _waymo_cams: &waymo_cams [FRONT, FRONT_LEFT, FRONT_RIGHT, SIDE_LEFT, SIDE_RIGHT]
 dataset:
   train:
     <<: *sampling
-    index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/geo/waymo/train/10017090168044687777_6380_000_6400_000.pkl]
+    index_paths: [/home1/irteam/workspace/instant-nurec/data/index/geo/waymo/train/10017090168044687777_6380_000_6400_000.pkl]
     camera_ids: *waymo_cams
     n_samples_per_sequence: 2
   val:
     <<: *sampling
-    index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/geo/waymo/train/10017090168044687777_6380_000_6400_000.pkl]
+    index_paths: [/home1/irteam/workspace/instant-nurec/data/index/geo/waymo/train/10017090168044687777_6380_000_6400_000.pkl]
     camera_ids: *waymo_cams
     n_samples_per_sequence: 1
 

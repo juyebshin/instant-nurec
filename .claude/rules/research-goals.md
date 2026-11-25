@@ -34,7 +34,7 @@ Be accurate about this in every plan and report. Sources: `docs/PMT_FINETUNE.md`
 | RoGS training initialised from these Gaussians | **not reported here.** Do not claim it. |
 | Multi-rig geometry | **planned** (`PMT_FINETUNE.md` §3). Zero-shot range ratio is 0.47 (Waymo) to 1.01 (HRDX). Waymo moved into training (geo split) 2026-11-21; HRDX is the held-out rig. |
 | Index export for DDAD / KITTI | **not implemented** |
-| OpenScene index (geo-split runs, 8 cameras, MoGe-3 depth, annotated boxes) | implemented 2026-11-23 (`logs/export_openscene.sh`); no M2F masks yet (user is generating them) |
+| OpenScene index (geo-split runs, 8 cameras, MoGe-3 depth, annotated boxes) | implemented 2026-11-23 (`scripts/index/export_openscene.sh`); M2F masks in since 2026-11-24 |
 | Motion head supervised by cuboid tracks on PMT data (`PMTIndexDatasetConfig.cuboid_tracks`, `pmt_openscene_motion.yaml`) | implemented 2026-11-23, default off; **not trained yet**. Every earlier PMT fine-tune skipped `primitive_velocity` (no tracks) |
 | Varying camera count or aspect from step to step in training | camera count verified (7 ↔ 6 at batch 1, AV2 + nuScenes smoke, 2026-11-20). **Aspect unverified**: always 504×280. |
 | Save on train end | fixed 2026-11-20 (`training/run.py::_StepCheckpoint`) |
@@ -102,5 +102,5 @@ trained head help", and it costs no GPU.
 - The AV2 test split (103 logs) is held out.
 - Split by whole log, never by frame.
 
-**One loader for non-NCore data.** Extend `PMTIndexDataset` and the PMT exporter. Do not add a
+**One loader for non-NCore data.** Extend `PMTIndexDataset` and its exporter (`tools/index_export/`). Do not add a
 parallel dataset class per source; its training contract is the one that was checked.

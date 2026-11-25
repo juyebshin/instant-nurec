@@ -15,7 +15,7 @@ logger:
 dataset:
   train: &train_pmt
     index_paths:
-      - /home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/av2/train
+      - /home1/irteam/workspace/instant-nurec/data/index/av2/train
     camera_ids: [ring_front_center, ring_front_right, ring_front_left, ring_rear_right, ring_rear_left,
                  ring_side_right, ring_side_left]
     camera_subsampler: {frame_width: 504, frame_height: 280}
@@ -32,7 +32,7 @@ dataset:
   val:
     <<: *train_pmt
     index_paths:
-      - /home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/av2/val
+      - /home1/irteam/workspace/instant-nurec/data/index/av2/val
     n_samples_per_sequence: 1
 
 model:

@@ -7,7 +7,7 @@
 # predict CROSSWALK, so LANE and CROSSWALK labels fold into ROAD and BOUNDARY into OTHERS (semantic_remap),
 # and map classes are assigned after the fact (projection + voting, or RoGS optimisation).
 #
-# Index tree: PseudoMapTrainer RoGS/output/inurec_finetune/index/geo, built by logs/export_geo.sh.
+# Index tree: data/index/geo, built by scripts/index/export_geo.sh.
 # Train: 695 AV2 x 5 + 554 nuScenes x 6 + 700 Waymo x 5 = 10299 samples (about a third each).
 #   nuScenes geo-train lists 657 scenes; 103 are from the official test split, which has no MoGe depth.
 # Val: 25 AV2 of 150, 25 nuScenes of 99, 25 Waymo of 151 geo-val logs (fixed draw).
@@ -15,7 +15,7 @@
 #
 # Labels: depth = DVGT LiDAR-aligned MoGe-3 on 2 Hz frames (all three); semantics = M2F masks. Waymo masks
 # come from PMT Mask2Former/demo/inference_waymo.py and are in the index only after a re-export
-# (REEXPORT_WAYMO=1 logs/export_geo.sh); without them Waymo frames carry semantic_class 255, so a Waymo
+# (REEXPORT_WAYMO=1 scripts/index/export_geo.sh); without them Waymo frames carry semantic_class 255, so a Waymo
 # batch skips the semantic loss and trains no sky cubemap. Waymo images and masks are undistorted on
 # load (index `distortion`), and depth
 # covers only the upper ~55% of the side cameras (DVGT crops around their high principal point).
@@ -51,19 +51,19 @@ dataset:
       av2:
         config:
           <<: *sampling
-          index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/geo/av2/train]
+          index_paths: [/home1/irteam/workspace/instant-nurec/data/index/geo/av2/train]
           camera_ids: *av2_cams
           n_samples_per_sequence: 5
       nusc:
         config:
           <<: *sampling
-          index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/geo/nusc/train]
+          index_paths: [/home1/irteam/workspace/instant-nurec/data/index/geo/nusc/train]
           camera_ids: *nusc_cams
           n_samples_per_sequence: 6
       waymo:
         config:
           <<: *sampling
-          index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/geo/waymo/train]
+          index_paths: [/home1/irteam/workspace/instant-nurec/data/index/geo/waymo/train]
           camera_ids: *waymo_cams
           n_samples_per_sequence: 5
   val:
@@ -72,21 +72,21 @@ dataset:
         sample_ratio: 0.17        # 25 of 150 geo-val logs
         config:
           <<: *sampling
-          index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/geo/av2/val]
+          index_paths: [/home1/irteam/workspace/instant-nurec/data/index/geo/av2/val]
           camera_ids: *av2_cams
           n_samples_per_sequence: 1
       nusc:
         sample_ratio: 0.26        # 25 of 99 geo-val scenes
         config:
           <<: *sampling
-          index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/geo/nusc/val]
+          index_paths: [/home1/irteam/workspace/instant-nurec/data/index/geo/nusc/val]
           camera_ids: *nusc_cams
           n_samples_per_sequence: 1
       waymo:
         sample_ratio: 0.17        # 25 of 151 geo-val segments
         config:
           <<: *sampling
-          index_paths: [/home1/irteam/workspace/PseudoMapTrainer/RoGS/output/inurec_finetune/index/geo/waymo/val]
+          index_paths: [/home1/irteam/workspace/instant-nurec/data/index/geo/waymo/val]
           camera_ids: *waymo_cams
           n_samples_per_sequence: 1
 

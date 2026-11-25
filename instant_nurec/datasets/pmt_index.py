@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Training dataset for non-NCore logs (AV2 / nuScenes / Waymo) from per-log index pickles.
 
-The index is written by PseudoMapTrainer ``RoGS/scripts/inurec_finetune_index.py``
-(that env has the AV2 / nuScenes devkits; this one does not)::
+The index is written by ``tools/index_export/export_index.py`` into ``data/index/`` (until 2026-11-25 by
+PseudoMapTrainer ``RoGS/scripts/inurec_finetune_index.py``; same output)::
 
     sequence_id: str
     cameras: {name: {"K": (3, 3), "wh": (W, H), "T_cam_ego": (4, 4)}}   # OpenCV camera frame
