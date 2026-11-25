@@ -11,7 +11,8 @@ Reads ``<scene>.ply`` and, when they sit next to it, ``.sky.npz`` (sky cubemap +
 then open http://localhost:8080 (through ``ssh -L 8080:localhost:8080 <host>`` from another machine).
 
 The ego trajectory (``.cameras.npz``) is drawn with the ego at the time slider's value as a box + axes; the
-traversed part of the trajectory is highlighted.
+traversed part of the trajectory is highlighted. With "follow ego" on, the view moves with the ego whenever the time
+changes (play or the slider), keeping its pose relative to the ego; orbit it between ticks to change that pose.
 
 Render modes: rgb (Gaussians over the sky, through the chosen camera's ISP affine, as the model renders), rgb
 without sky, semantic class (the PLY's ``semantic_class`` from ``--index-path`` runs; otherwise only its road / sky
@@ -305,6 +306,10 @@ class Viewer:
         timed = n_dynamic > 0 or scene.ego_t is not None
         self.time = gui.add_slider("time [s]", min=0.0, max=span, step=0.05, initial_value=0.0, disabled=not timed)
         self.play = gui.add_checkbox("play", initial_value=False, disabled=not timed)
+        self.follow = gui.add_checkbox(
+            "follow ego", initial_value=False, disabled=scene.ego_t is None,
+            hint="the view moves with the ego as the time changes (play or slider), keeping its pose to the ego",
+        )
         # the dynamic layer is MOVABLE, so MOVABLE gets a box whenever there is one, even with no static MOVABLE
         # Gaussians (AV2 / nuScenes / Waymo send them all to the dynamic layer)
         movable = int(KelvinSemanticClass.MOVABLE)
@@ -337,6 +342,9 @@ class Viewer:
             self.show_ego.on_update(lambda _: self._set_ego_visible(self.show_ego.value))
             self._add_ego()
             self.time.on_update(lambda _: self.update_ego())
+            self.follow_lock = threading.Lock()
+            self.ego_ref = scene.ego_pose(scene.t0 + int(self.time.value * 1e6))  # ego pose at the last time change
+            self.time.on_update(lambda _: self.follow_ego())
         self.stats = gui.add_text("last frame", initial_value="", disabled=True)
         self.server.on_client_connect(self.on_connect)
         self.server.on_client_disconnect(lambda client: self.clients.pop(client.client_id, None))
@@ -387,6 +395,23 @@ class Viewer:
         colors = np.where(past[:, None, None], np.array(self.PAST, np.uint8), np.array(self.FUTURE, np.uint8))
         self.ego_line.colors = np.ascontiguousarray(np.broadcast_to(colors, (len(past), 2, 3)))
 
+    def follow_ego(self) -> None:
+        """With "follow ego" on, move every client's view by the ego's motion since the last time change, so the
+        view keeps its pose relative to the ego (a chase camera that can still be orbited between ticks)."""
+        T = self.scene.ego_pose(self.scene.t0 + int(self.time.value * 1e6))
+        with self.follow_lock:
+            delta, self.ego_ref = T @ np.linalg.inv(self.ego_ref), T
+        if not self.follow.value:
+            return
+        for client in self.server.get_clients().values():
+            c2w = np.eye(4)
+            c2w[:3, :3] = vtf.SO3(client.camera.wxyz).as_matrix()
+            c2w[:3, 3] = client.camera.position
+            c2w = delta @ c2w
+            with client.atomic():
+                client.camera.wxyz = vtf.SO3.from_matrix(c2w[:3, :3]).wxyz
+                client.camera.position = c2w[:3, 3]
+
     def _set_ego_visible(self, visible: bool) -> None:
         self.ego_line.visible = visible
         self.ego_frame.visible = visible
@@ -399,13 +424,14 @@ class Viewer:
         """Look through context frame ``i``: its pose, vertical FoV, time and ISP camera."""
         cams = self.scene.cameras
         c2w, K, wh = cams["c2w"][i], cams["K"][i], cams["wh"][i]
+        # time first: with "follow ego" on, the time change moves the views, and this one then lands on the frame
+        self.time.value = min(max((int(cams["timestamps_us"][i]) - self.scene.t0) / 1e6, 0.0), self.time.max)
+        if str(cams["camera"][i]) in self.scene.affine_names:
+            self.affine.value = str(cams["camera"][i])
         with client.atomic():
             client.camera.fov = 2 * math.atan(0.5 * float(wh[1]) / float(K[1, 1]))
             client.camera.wxyz = vtf.SO3.from_matrix(c2w[:3, :3]).wxyz
             client.camera.position = c2w[:3, 3]
-        self.time.value = min(max((int(cams["timestamps_us"][i]) - self.scene.t0) / 1e6, 0.0), self.time.max)
-        if str(cams["camera"][i]) in self.scene.affine_names:
-            self.affine.value = str(cams["camera"][i])
 
     def update_classes(self) -> None:
         on = {c for c, box in self.class_boxes.items() if box.value}
