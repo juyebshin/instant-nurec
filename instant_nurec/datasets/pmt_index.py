@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import logging
 import pickle
 from collections import OrderedDict
 from pathlib import Path
@@ -64,6 +65,8 @@ from instant_nurec.utils.batch import (
 )
 from instant_nurec.utils.geometry import se3_matrix_inverse
 from instant_nurec.utils.types import FrameConversion, HalfClosedInterval, RayFlags, RigTrajectories
+
+logger = logging.getLogger(__name__)
 
 ROAD_SURFACE = (int(C.ROAD), int(C.LANE), int(C.CROSSWALK))
 IGNORE = 255
@@ -426,7 +429,8 @@ class PMTIndexDataset(BaseInstantNuRecIndexableDataset[InstantNuRecDataBatch]):
 
     def load_full_camera_rig(self, index_path: str, reference_rig: RigTrajectories, camera_id: str) -> RigTrajectories:
         """Every frame of ``camera_id`` in the log as a lightweight rig (no images), in ``reference_rig``'s frame;
-        the PMT counterpart of ``NCoreInstantNuRecDataset.load_full_camera_rig`` (calibrated video)."""
+        the PMT counterpart of ``NCoreInstantNuRecDataset.load_full_camera_rig`` (calibrated video). If --max-chunks
+        truncated the log, only the frames inside the reconstructed chunks (the NCore loader raises instead)."""
         index = next(x for x in self.indexes if x["_path"] == str(index_path))
         times = {cam: np.array([index["frames"][cam][i]["t_us"] for i in self._context_candidates(index, cam)],
                                np.int64) for cam in self.config.camera_ids}
@@ -434,12 +438,23 @@ class PMTIndexDataset(BaseInstantNuRecIndexableDataset[InstantNuRecDataBatch]):
         sampler = self.config.frame_batch_sampler
         required = max(1, -(-(interval.end - interval.start) // (sampler.max_frame_gap_timestamp_us
                                                                  * self.config.n_frames_per_sample)))
-        if required > self.num_samples_per_sequence:
-            raise ValueError(f"Full calibrated video requires a complete reconstructed scene, but --max-chunks="
-                             f"{self.num_samples_per_sequence} covers only part of this log. Rerun with "
-                             f"--max-chunks {required}.")
         calibration = reference_rig.camera_calibrations[camera_id]
         stamps = np.array([f["t_us"] for f in index["frames"][camera_id]], np.int64)
+        if required > self.num_samples_per_sequence:
+            # --max-chunks truncated the log: render only the span of the reconstructed chunks. The sampler cuts
+            # the interval into ``required`` equal chunks and keeps the first ``num_samples_per_sequence``.
+            covered_end = interval.start + (interval.end - interval.start) * self.num_samples_per_sequence / required
+            n_all = len(stamps)
+            stamps = stamps[stamps < covered_end]
+            if len(stamps) == 0:
+                raise ValueError(f"{index_path}: no {camera_id} frame inside the {self.num_samples_per_sequence} "
+                                 f"reconstructed chunk(s)")
+            logger.warning(
+                "--max-chunks=%d covers %d of %d chunks of this log: the video renders %d of %d %s frames "
+                "(%.1f s of %.1f s). Rerun with --max-chunks %d for the whole log.",
+                self.num_samples_per_sequence, self.num_samples_per_sequence, required, len(stamps), n_all,
+                camera_id, (covered_end - interval.start) / 1e6, (interval.end - interval.start) / 1e6, required,
+            )
         ts, poses = index["rig"]["timestamps_us"], index["rig"]["T_ego_world"]
         ts = np.concatenate([[min(ts[0], stamps[0]) - 1], ts, [max(ts[-1], stamps[-1]) + 1]])
         poses = np.concatenate([poses[:1], poses, poses[-1:]])

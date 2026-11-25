@@ -122,7 +122,9 @@ directories of them) instead of `--ncore-path` and runs them through the same pr
 - Chunk merge, voxelisation, and the PLY / `.sky.npz` / `.dynamic.npz` export are the NCore ones.
   `--render-preview` and `--render-video` work through a pinhole branch in `render_composited_frame`
   (before this, those renders were F-theta only). `--render-video` renders every frame of the first camera
-  in the log; checked on the Waymo val log below (198 FRONT frames, 10 fps, 19.8 s).
+  in the log; checked on the Waymo val log below (198 FRONT frames, 10 fps, 19.8 s). Since 2026-11-25, when
+  `--max-chunks` truncates the log the video stops at the end of the last reconstructed chunk (a warning names
+  the frame count and the `--max-chunks` for the whole log); before, it raised and wrote no video.
 - Cameras default to all of the index's cameras in its order, which is the fine-tune's order, at any count.
   The released model's 1 / 3 / 5 camera check applies to NCore input only.
 - OpenScene boxes become cuboid tracks, so `--motion-source tracks` uses them. The other datasets have no

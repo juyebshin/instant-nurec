@@ -213,7 +213,8 @@ def make_parser() -> argparse.ArgumentParser:
             "Render every original frame from the first context camera as an H.264 MP4, "
             "using the source F-theta calibration, exposure trajectory, and sky. Requires "
             "one resolved sequence, --merge, enough --max-chunks for full coverage, "
-            "`uv sync --extra render`, and ffmpeg with libx264."
+            "`uv sync --extra render`, and ffmpeg with libx264. With --index-path, a log that "
+            "--max-chunks truncates renders only the frames of the reconstructed chunks."
         ),
     )
     parser.add_argument(
