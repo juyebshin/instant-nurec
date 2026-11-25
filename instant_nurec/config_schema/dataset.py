@@ -238,6 +238,14 @@ class PMTIndexDatasetConfig(BaseConfigSchema):
         "loader does, which supervises the motion head (primitive_velocity) and moves the dynamic layer by the boxes. "
         "track_label_source is unused (index boxes are annotations).",
     )
+    track_dynamic_any_chunk: bool = Field(
+        default=False,
+        description="Off: a track is DYNAMIC when it travels over track_min_travel_distance_m within the sample's "
+        "window (as the NCore loader). On (run_inference --index-path; needs cuboid_tracks and frame_batch_sampler): "
+        "also when that rule makes it DYNAMIC in any other chunk of the log. A vehicle stopped in one chunk and "
+        "moving in another then stays in the dynamic layer, instead of a static layer that the chunk merge drops "
+        "where later chunks see its spot empty.",
+    )
     supervision_frame_batch: SupervisionFrameBatchConfig = Field(default_factory=SupervisionFrameBatchConfig)
     frame_batch_sampler: AdaptiveSequentialFrameBatchSamplerConfig | None = Field(
         default=None,

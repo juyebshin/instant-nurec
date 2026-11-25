@@ -145,6 +145,9 @@ class PMTIndexDataset(BaseInstantNuRecIndexableDataset[InstantNuRecDataBatch]):
         self._remap = np.arange(256, dtype=np.uint8)  # composed onto each index's semantic_lut
         for old, new in config.semantic_remap.items():
             self._remap[old] = new
+        if config.track_dynamic_any_chunk and (config.frame_batch_sampler is None or config.cuboid_tracks is None):
+            raise ValueError("track_dynamic_any_chunk needs cuboid_tracks and the predict chunks (frame_batch_sampler)")
+        self._any_chunk_dynamic: dict[str, set[str]] = {}  # index path -> track ids DYNAMIC in any chunk
         self.indexes = []
         paths = [str(q) for p in config.index_paths
                  for q in (sorted(Path(p).glob("*.pkl")) if Path(p).is_dir() else [Path(p)])]
@@ -349,32 +352,62 @@ class PMTIndexDataset(BaseInstantNuRecIndexableDataset[InstantNuRecDataBatch]):
         data = DataAndRenderingBatch(data=DataBatch(camera=DataBatch.Camera.collate_fn(camera_batches)))
         return data, rig
 
+    def _track_window(self, index, track, t_min: int, t_max: int,
+                      T_world_ref: np.ndarray) -> tuple[np.ndarray, np.ndarray, float] | None:
+        """One track around the context span [t_min, t_max] (window, self-box skip, one-step extrapolation at each
+        end) -> box poses in ``T_world_ref``'s frame, their timestamps and the travel that decides DYNAMIC; None if it
+        has <= 1 box."""
+        params = self.config.cuboid_tracks
+        lo, hi = t_min - params.track_extrapolate_timestamps_us, t_max + params.track_extrapolate_timestamps_us
+        ts = track["timestamps_us"]
+        keep = np.nonzero((ts >= lo) & (ts < hi))[0]
+        keep = [k for k in keep if np.linalg.norm(  # skip self-classifications (box centre near the rig)
+            (np.linalg.inv(self._pose(index, int(ts[k]))) @ track["T_box_world"][k])[:3, 3]
+        ) >= params.track_min_centroid_rig_dist_m]
+        if len(keep) <= 1:
+            return None
+        P, t = T_world_ref @ track["T_box_world"][keep], ts[keep]
+        pre, post = (P[0] @ np.linalg.inv(P[1])) @ P[0], (P[-1] @ np.linalg.inv(P[-2])) @ P[-1]
+        P = np.concatenate([pre[None], P, post[None]]).astype(np.float32)
+        t = np.concatenate([[t[0] - (t[1] - t[0])], t, [t[-1] + (t[-1] - t[-2])]]).astype(np.int64)
+        travel = float(np.linalg.norm(P[-1, :3, 3] - P[0, :3, 3])) * (t_max - t_min) / (t[-1] - t[0])
+        return P, t, travel
+
+    def _dynamic_in_any_chunk(self, index) -> set[str]:
+        """Ids of the tracks that are DYNAMIC (travel rule) in at least one of the log's predict chunks."""
+        if index["_path"] not in self._any_chunk_dynamic:
+            ids = set()
+            for k in range(self.num_samples_per_sequence):
+                chunk = self._sequential_context(index, k)
+                if not chunk:
+                    break
+                span = [index["frames"][c][i]["t_us"] for c, idxs in chunk.items() for i in idxs]
+                for track_id, track in index["tracks"].items():
+                    window = self._track_window(index, track, min(span), max(span), np.eye(4))
+                    if window is not None and window[2] > self.config.cuboid_tracks.track_min_travel_distance_m:
+                        ids.add(str(track_id))
+            self._any_chunk_dynamic[index["_path"]] = ids
+        return self._any_chunk_dynamic[index["_path"]]
+
     def _cuboid_tracks(self, index, context_batch: dict[str, list[int]], T_world_ref: np.ndarray) -> CuboidTracksDataPack:
         """The index's boxes -> cuboid tracks around the context span, following
         ``NCoreInstantNuRecDataset._compute_cuboid_tracks`` (window, self-box skip, one-step extrapolation at each
-        end, DYNAMIC = always-moving class or travel over the threshold)."""
+        end, DYNAMIC = always-moving class or travel over the threshold; with ``track_dynamic_any_chunk``, travel over
+        the threshold in any chunk of the log)."""
         params = self.config.cuboid_tracks
         if "tracks" not in index:
             raise ValueError(f"{index['_path']}: cuboid_tracks is set but the index has no 'tracks'")
         span = [index["frames"][c][i]["t_us"] for c, idxs in context_batch.items() for i in idxs]
         t_min, t_max = min(span), max(span)
-        lo, hi = t_min - params.track_extrapolate_timestamps_us, t_max + params.track_extrapolate_timestamps_us
+        any_chunk = self._dynamic_in_any_chunk(index) if self.config.track_dynamic_any_chunk else set()
         ids, poses, stamps, flags, dims = [], [], [], [], []
         for track_id, track in index["tracks"].items():
-            ts = track["timestamps_us"]
-            keep = np.nonzero((ts >= lo) & (ts < hi))[0]
-            keep = [k for k in keep if np.linalg.norm(  # skip self-classifications (box centre near the rig)
-                (np.linalg.inv(self._pose(index, int(ts[k]))) @ track["T_box_world"][k])[:3, 3]
-            ) >= params.track_min_centroid_rig_dist_m]
-            if len(keep) <= 1:
+            window = self._track_window(index, track, t_min, t_max, T_world_ref)
+            if window is None:
                 continue
-            P, t = T_world_ref @ track["T_box_world"][keep], ts[keep]
-            pre, post = (P[0] @ np.linalg.inv(P[1])) @ P[0], (P[-1] @ np.linalg.inv(P[-2])) @ P[-1]
-            P = np.concatenate([pre[None], P, post[None]]).astype(np.float32)
-            t = np.concatenate([[t[0] - (t[1] - t[0])], t, [t[-1] + (t[-1] - t[-2])]]).astype(np.int64)
-            travel = float(np.linalg.norm(P[-1, :3, 3] - P[0, :3, 3])) * (t_max - t_min) / (t[-1] - t[0])
+            P, t, travel = window
             dynamic = (track["label"] in NCoreInstantNuRecDataset.UNCONDITIONALLY_DYNAMIC_LABELS
-                       or travel > params.track_min_travel_distance_m)
+                       or travel > params.track_min_travel_distance_m or str(track_id) in any_chunk)
             ids.append(str(track_id))
             poses.append(P)
             stamps.append(t)

@@ -135,6 +135,12 @@ directories of them) instead of `--ncore-path` and runs them through the same pr
   The released model's 1 / 3 / 5 camera check applies to NCore input only.
 - OpenScene boxes become cuboid tracks, so `--motion-source tracks` uses them. The other datasets have no
   boxes, so their dynamic layer is the MOVABLE pixels with learned motion.
+- Since 2026-11-25 `--index-path` sets `track_dynamic_any_chunk`: a box that is DYNAMIC (travel > 1.5 m in the
+  chunk's window) in any chunk of the log is DYNAMIC in every chunk. Before, a vehicle stopped in one chunk went
+  to that chunk's static layer, and the merge's frustum ownership, which is spatial only, dropped it wherever a
+  later chunk saw the spot from closer after it had left. A stopped bus (OpenScene
+  `2021.09.14.18.43.41_veh-45_00885_00952_0-133`, 27.5–31.0 s) was missing from the video until it drove off. The
+  field is off by default, so training configs are unchanged.
 - The world is moved to the log's first rig pose; OpenScene's UTM coordinates (~4e6 m) would lose ~0.3 m to
   float32. `.cameras.npz` stores the offset (`world_origin`; dataset world = PLY + `world_origin`) next to
   every context camera's pose and K, for the viewer.
