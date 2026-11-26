@@ -95,6 +95,15 @@ def merge_context_batch(
                 dtype=frame_meta.unique_frame_idx_tensor.dtype,
                 device=frame_meta.unique_frame_idx_tensor.device,
             )
+    # Overlapping chunks (chunk_overlap_frames > 0) share frames, which now map to one unique_frame_idx:
+    # keep the first copy so every merged frame appears once. Without overlap nothing is dropped.
+    camera = unpack_optional(collated_context_batch.camera)
+    seen: set[int] = set()
+    keep = [i for i, m in enumerate(camera.meta) if not (m.unique_frame_idx in seen or seen.add(m.unique_frame_idx))]
+    if len(keep) < camera.b:
+        collated_context_batch.camera = DataBatch.Camera(
+            meta=[camera.meta[i] for i in keep], labels=camera.labels[torch.tensor(keep)]
+        )
     return collated_context_batch
 
 
@@ -287,7 +296,8 @@ class KelvinPrimitiveMerge:
         batch: InstantNuRecDataBatch,
     ) -> tuple[KelvinInstantNuRecPrimitive, InstantNuRecDataBatch]:
         """
-        Merge primitives from non-overlapping chunks into a single primitive.
+        Merge primitives from consecutive chunks (non-overlapping by default; see chunk_overlap_frames) into a
+        single primitive.
 
         Stage 1 transforms each primitive into the reference frame (first chunk) so they can be
         concatenated; stage 2 dispatches to ``merge_processed_primitives``; stage 3 stitches the

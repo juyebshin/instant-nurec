@@ -53,7 +53,7 @@ import ncore.data
 from instant_nurec.config_schema.dataset import PMTIndexDatasetConfig
 from instant_nurec.datasets.instantnurec_base import BaseInstantNuRecIndexableDataset, CameraSubsampler
 from instant_nurec.datasets.instantnurec_ncore import NCoreInstantNuRecDataset
-from instant_nurec.datasets.samplers import AdaptiveSequentialFrameBatchSampler
+from instant_nurec.datasets.samplers import AdaptiveSequentialFrameBatchSampler, count_sequential_chunks
 from instant_nurec.datasets.tracks import CuboidTracks, CuboidTracksDataPack, TrackFlags
 from instant_nurec.primitives.kelvin_primitive import KelvinSemanticClass as C
 from instant_nurec.utils.batch import (
@@ -469,14 +469,15 @@ class PMTIndexDataset(BaseInstantNuRecIndexableDataset[InstantNuRecDataBatch]):
                                np.int64) for cam in self.config.camera_ids}
         interval = self._sequence_interval(index, times)
         sampler = self.config.frame_batch_sampler
-        required = max(1, -(-(interval.end - interval.start) // (sampler.max_frame_gap_timestamp_us
-                                                                 * self.config.n_frames_per_sample)))
+        n, k = self.config.n_frames_per_sample, sampler.chunk_overlap_frames
+        required = count_sequential_chunks(interval.end - interval.start, n, sampler.max_frame_gap_timestamp_us, k)
         calibration = reference_rig.camera_calibrations[camera_id]
         stamps = np.array([f["t_us"] for f in index["frames"][camera_id]], np.int64)
         if required > self.num_samples_per_sequence:
             # --max-chunks truncated the log: render only the span of the reconstructed chunks. The sampler cuts
-            # the interval into ``required`` equal chunks and keeps the first ``num_samples_per_sequence``.
-            covered_end = interval.start + (interval.end - interval.start) * self.num_samples_per_sequence / required
+            # the interval into ``required`` chunks of equal slots and keeps the first ``num_samples_per_sequence``.
+            m = self.num_samples_per_sequence
+            covered_end = interval.start + (interval.end - interval.start) * (m * (n - k) + k) / (required * (n - k) + k)
             n_all = len(stamps)
             stamps = stamps[stamps < covered_end]
             if len(stamps) == 0:

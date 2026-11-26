@@ -50,6 +50,14 @@ def transform_rig_trajectories(
 
 
 @torch.autocast(device_type="cuda", enabled=False)
+def _first_occurrences(frame_timestamps_us: torch.Tensor) -> torch.Tensor:
+    """Drop repeated frames (same END timestamp) from a [n, 2] start/end tensor, keeping the first copy in order.
+    Overlapping chunks (chunk_overlap_frames > 0) share frames; without overlap this returns the input unchanged."""
+    seen: set[int] = set()
+    keep = [i for i, t in enumerate(frame_timestamps_us[:, 1].tolist()) if not (t in seen or seen.add(t))]
+    return frame_timestamps_us if len(keep) == len(frame_timestamps_us) else frame_timestamps_us[keep]
+
+
 def merge_rig_trajectories(
     rig_trajectories_list: list[RigTrajectories],
 ) -> tuple[RigTrajectories, dict[tuple[int, int], int]]:
@@ -105,7 +113,7 @@ def merge_rig_trajectories(
             torch.int64
         )
         merged_cameras_frame_timestamps_us = {
-            camera_id: torch.cat(frame_timestamps_us_list, dim=0)
+            camera_id: _first_occurrences(torch.cat(frame_timestamps_us_list, dim=0))
             for camera_id, frame_timestamps_us_list in cameras_frame_timestamps_us_list.items()
         }
 

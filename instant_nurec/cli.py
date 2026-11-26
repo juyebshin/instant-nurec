@@ -110,6 +110,16 @@ def make_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--chunk-overlap-frames",
+        type=int,
+        default=0,
+        help=(
+            "Frames per camera shared by consecutive chunks (default 0: non-overlapping chunks, the "
+            "released behaviour). Must be below the chunk's frame count. With --merge, every chunk boundary "
+            "is then reconstructed up close by both neighbouring chunks."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         required=True,
@@ -240,6 +250,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--render-video requires --merge so one complete scene is rendered")
     if args.max_chunks <= 0:
         parser.error("--max-chunks must be greater than zero")
+    if args.chunk_overlap_frames < 0:
+        parser.error("--chunk-overlap-frames must not be negative")
     if args.index_path is None and (args.n_frames is not None or args.max_frame_gap_us != 750_000):
         parser.error("--n-frames / --max-frame-gap-us apply to --index-path input only")
 
@@ -282,6 +294,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     profile = get_model_profile(args.model)
     if args.index_path is not None:
         return _main_index(args, parser, profile)
+    if args.chunk_overlap_frames >= profile.n_frames_per_sample:
+        parser.error(f"--chunk-overlap-frames must be below the {profile.n_frames_per_sample} frames per chunk")
 
     json_paths = resolve_ncore_paths(args.ncore_path)
     if args.render_video and len(json_paths) != 1:
@@ -331,6 +345,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 frame_batch_sampler=AdaptiveSequentialFrameBatchSamplerConfig(
                     n_frames_per_sample=profile.n_frames_per_sample,
                     n_samples_per_sequence=args.max_chunks,
+                    chunk_overlap_frames=args.chunk_overlap_frames,
                 ),
             ),
         ),
@@ -382,6 +397,8 @@ def _main_index(args: argparse.Namespace, parser: argparse.ArgumentParser, profi
     camera_ids = list(args.camera_ids or first["cameras"])
     tracks = "tracks" in first and args.motion_source != "learned"  # reconstruct() ignores tracks for learned motion
     n_frames = args.n_frames or profile.n_frames_per_sample
+    if args.chunk_overlap_frames >= n_frames:
+        parser.error(f"--chunk-overlap-frames must be below the {n_frames} frames per chunk")
     logging.getLogger(__name__).info(
         "%d index log(s), cameras %s, %d frames per camera per chunk, gap <= %d us",
         len(index_paths), camera_ids, n_frames, args.max_frame_gap_us,
@@ -410,6 +427,7 @@ def _main_index(args: argparse.Namespace, parser: argparse.ArgumentParser, profi
                     n_frames_per_sample=n_frames,
                     n_samples_per_sequence=args.max_chunks,
                     max_frame_gap_timestamp_us=args.max_frame_gap_us,
+                    chunk_overlap_frames=args.chunk_overlap_frames,
                 ),
             ),
         ),

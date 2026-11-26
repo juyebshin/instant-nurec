@@ -45,6 +45,7 @@ from instant_nurec.datasets.samplers import (
     AdaptiveSequentialFrameBatchSampler,
     SampledSensorFrameIdxs,
     UniformFrameBatchSampler,
+    count_sequential_chunks,
     get_closest_frame_index,
 )
 from instant_nurec.utils.batch import (
@@ -867,12 +868,20 @@ class NCoreInstantNuRecDataset(BaseInstantNuRecIndexableDataset[InstantNuRecData
             else self.config.frame_batch_sampler.max_frame_gap_timestamp_us
         )
         max_chunk_timespan_us = gap_us * self._n_frames_per_sample
-        required_chunks = max(
-            1,
-            math.ceil(
-                (sequence_end_timestamp_us - sequence_start_timestamp_us) / max_chunk_timespan_us
-            ),
-        )
+        if self.config.frame_batch_sampler.name == "uniform":
+            required_chunks = max(
+                1,
+                math.ceil(
+                    (sequence_end_timestamp_us - sequence_start_timestamp_us) / max_chunk_timespan_us
+                ),
+            )
+        else:
+            required_chunks = count_sequential_chunks(
+                sequence_end_timestamp_us - sequence_start_timestamp_us,
+                self._n_frames_per_sample,
+                gap_us,
+                self.config.frame_batch_sampler.chunk_overlap_frames,
+            )
         if required_chunks > self.num_samples_per_sequence:
             raise ValueError(
                 "Full calibrated video requires a complete reconstructed scene, but "

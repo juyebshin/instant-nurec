@@ -77,6 +77,16 @@ class AdaptiveSequentialFrameBatchSamplerConfig(BaseConfigSchema):
         gt=0,
         description="Fixed timestamp gap used when name=uniform (the reference training sampler).",
     )
+    chunk_overlap_frames: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Frame slots shared by consecutive chunks (name=adaptive_sequential only; must be below "
+            "n_frames_per_sample). 0 keeps the upstream non-overlapping chunks. With K > 0, chunk i starts at slot "
+            "i * (n_frames_per_sample - K), so each boundary is seen up close by both neighbours, as the paper's "
+            "merge assumes; the shared frames are kept once in the merged batch."
+        ),
+    )
 
 
 class CameraSubsamplerConfig(BaseConfigSchema):

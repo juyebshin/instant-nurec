@@ -41,6 +41,17 @@ def get_closest_frame_index(frame_timestamps_us: np.ndarray, target_timestamp_us
     return int(np.abs(frame_timestamps_us.astype(np.int64) - target_timestamp_us).argmin())
 
 
+def count_sequential_chunks(span_us: int, n_frames: int, max_gap_us: int, overlap_frames: int = 0) -> int:
+    """Chunks AdaptiveSequentialFrameBatchSampler cuts a span into: the fewest whose slot gap stays <= max_gap_us.
+
+    n chunks hold n * (n_frames - overlap_frames) + overlap_frames slots, since consecutive chunks share
+    overlap_frames of them. Integer arithmetic; with overlap_frames = 0 this is ceil(span / (max_gap * n_frames)).
+    """
+    assert 0 <= overlap_frames < n_frames, "chunk_overlap_frames must be in [0, n_frames_per_sample)"
+    stride = n_frames - overlap_frames
+    return max(1, -(-(int(span_us) - overlap_frames * max_gap_us) // (max_gap_us * stride)))
+
+
 # `sampled_sensor_frame_idxs` mapping: camera id → frame indices.
 SampledSensorFrameIdxs = dict[str, list[int]]
 
@@ -51,6 +62,7 @@ class AdaptiveSequentialFrameBatchSampler:
 
     The sequence is split into the minimum number of equal-sized chunks such that each chunk can be represented by
     n_frames_per_sample frame slots with max_frame_gap_timestamp_us spacing. Each sample index returns one chunk.
+    With chunk_overlap_frames = K > 0, consecutive chunks share K slots (chunk i starts at slot i * (n - K)).
     """
 
     def __init__(
@@ -63,9 +75,13 @@ class AdaptiveSequentialFrameBatchSampler:
         self.n_frames_per_sample: int = n_frames_per_sample
         self.n_samples_per_sequence: int = config.n_samples_per_sequence
         self.max_frame_gap_timestamp_us: int = config.max_frame_gap_timestamp_us
+        self.chunk_overlap_frames: int = config.chunk_overlap_frames
         assert self.n_frames_per_sample > 0, "n_frames_per_sample must be positive"
         assert self.n_samples_per_sequence > 0, "n_samples_per_sequence must be positive"
         assert self.max_frame_gap_timestamp_us > 0, "max_frame_gap_timestamp_us must be positive"
+        assert 0 <= self.chunk_overlap_frames < self.n_frames_per_sample, (
+            "chunk_overlap_frames must be in [0, n_frames_per_sample)"
+        )
 
     def sample_frame_batch(
         self,
@@ -83,12 +99,17 @@ class AdaptiveSequentialFrameBatchSampler:
         sequence_end_timestamp = max(interval.end for interval in time_intervals)
         sequence_total_timespan = sequence_end_timestamp - sequence_start_timestamp
         max_chunk_timespan = self.max_frame_gap_timestamp_us * self.n_frames_per_sample
-        n_chunks = max(1, int(np.ceil(sequence_total_timespan / max_chunk_timespan)))
+        overlap = self.chunk_overlap_frames
+        stride = self.n_frames_per_sample - overlap
+        n_chunks = count_sequential_chunks(
+            sequence_total_timespan, self.n_frames_per_sample, self.max_frame_gap_timestamp_us, overlap
+        )
 
         if sample_idx == 0 and n_chunks > self.n_samples_per_sequence:
             chunk_seconds = max_chunk_timespan / 1e6
+            stride_seconds = self.max_frame_gap_timestamp_us * stride / 1e6
             clip_seconds = sequence_total_timespan / 1e6
-            covered_seconds = self.n_samples_per_sequence * chunk_seconds
+            covered_seconds = (self.n_samples_per_sequence * stride + overlap) * self.max_frame_gap_timestamp_us / 1e6
             dropped = n_chunks - self.n_samples_per_sequence
             logger.warning(
                 "Clip spans %.1fs (~%d chunks of %.1fs) but n_samples_per_sequence=%d "
@@ -102,14 +123,14 @@ class AdaptiveSequentialFrameBatchSampler:
                 covered_seconds,
                 dropped,
                 n_chunks,
-                chunk_seconds,
+                stride_seconds,
             )
 
         if sample_idx >= n_chunks:
             return {}
 
-        frame_gap_timestamp_us = sequence_total_timespan / (n_chunks * self.n_frames_per_sample)
-        first_frame_idx = sample_idx * self.n_frames_per_sample
+        frame_gap_timestamp_us = sequence_total_timespan / (n_chunks * stride + overlap)
+        first_frame_idx = sample_idx * stride
         ref_frame_timestamps_us = [
             int(sequence_start_timestamp + (first_frame_idx + frame_idx) * frame_gap_timestamp_us)
             for frame_idx in range(self.n_frames_per_sample)
