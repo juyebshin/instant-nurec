@@ -11,8 +11,9 @@ Reads ``<scene>.ply`` and, when they sit next to it, ``.sky.npz`` (sky cubemap +
 then open http://localhost:8080 (through ``ssh -L 8080:localhost:8080 <host>`` from another machine).
 
 The ego trajectory (``.cameras.npz``) is drawn with the ego at the time slider's value as a box + axes; the
-traversed part of the trajectory is highlighted. With "follow ego" on, the view moves with the ego whenever the time
-changes (play or the slider), keeping its pose relative to the ego; orbit it between ticks to change that pose.
+traversed part of the trajectory is highlighted. With "follow ego" on, the view looks through the ego's front camera
+(the context camera facing the ego's +x, at its pose on the rig and its vertical FoV) at the slider time, so play
+drives the view along the trajectory as that camera saw it.
 
 Render modes: rgb (Gaussians over the sky, through the chosen camera's ISP affine, as the model renders), rgb
 without sky, semantic class (the PLY's ``semantic_class`` from ``--index-path`` runs; otherwise only its road / sky
@@ -168,6 +169,18 @@ class Scene:
             self.ego_T[:, :3, :3] = np.stack([c2w[:, :3, 2], -c2w[:, :3, 0], -c2w[:, :3, 1]], -1)
             self.ego_source = f"{self.cameras['camera'][0]} path (re-export for ego poses)"
 
+        # "follow ego" looks through the front camera: the context camera whose optical axis points most along the
+        # ego's +x, at its (rigid) pose in the ego frame and its vertical FoV
+        self.front = None  # (camera name, T_ego_camera, vertical fov [rad])
+        if self.ego_t is not None:
+            cams = self.cameras
+            first = {str(n): i for i, n in reversed(list(enumerate(cams["camera"])))}  # first frame per camera
+            rel = {n: np.linalg.inv(self.ego_pose(int(cams["timestamps_us"][i]))) @ cams["c2w"][i]
+                   for n, i in first.items()}
+            name = max(rel, key=lambda n: rel[n][0, 2])  # camera z (optical axis) . ego x
+            i = first[name]
+            self.front = (name, rel[name], 2 * math.atan(0.5 * float(cams["wh"][i][1]) / float(cams["K"][i][1, 1])))
+
     def ego_pose(self, t_us: int) -> np.ndarray:
         """Ego -> world at ``t_us``: linear in position, slerp in rotation, clamped to the trajectory."""
         t, T = self.ego_t, self.ego_T
@@ -307,8 +320,9 @@ class Viewer:
         self.time = gui.add_slider("time [s]", min=0.0, max=span, step=0.05, initial_value=0.0, disabled=not timed)
         self.play = gui.add_checkbox("play", initial_value=False, disabled=not timed)
         self.follow = gui.add_checkbox(
-            "follow ego", initial_value=False, disabled=scene.ego_t is None,
-            hint="the view moves with the ego as the time changes (play or slider), keeping its pose to the ego",
+            "follow ego", initial_value=False, disabled=scene.front is None,
+            hint=None if scene.front is None else f"look through the ego's front camera ({scene.front[0]}) at the "
+            "slider time, as play or the slider moves it",
         )
         # the dynamic layer is MOVABLE, so MOVABLE gets a box whenever there is one, even with no static MOVABLE
         # Gaussians (AV2 / nuScenes / Waymo send them all to the dynamic layer)
@@ -342,8 +356,8 @@ class Viewer:
             self.show_ego.on_update(lambda _: self._set_ego_visible(self.show_ego.value))
             self._add_ego()
             self.time.on_update(lambda _: self.update_ego())
-            self.follow_lock = threading.Lock()
-            self.ego_ref = scene.ego_pose(scene.t0 + int(self.time.value * 1e6))  # ego pose at the last time change
+        if scene.front is not None:
+            self.follow.on_update(lambda _: self.follow_ego(set_isp=True))
             self.time.on_update(lambda _: self.follow_ego())
         self.stats = gui.add_text("last frame", initial_value="", disabled=True)
         self.server.on_client_connect(self.on_connect)
@@ -395,20 +409,18 @@ class Viewer:
         colors = np.where(past[:, None, None], np.array(self.PAST, np.uint8), np.array(self.FUTURE, np.uint8))
         self.ego_line.colors = np.ascontiguousarray(np.broadcast_to(colors, (len(past), 2, 3)))
 
-    def follow_ego(self) -> None:
-        """With "follow ego" on, move every client's view by the ego's motion since the last time change, so the
-        view keeps its pose relative to the ego (a chase camera that can still be orbited between ticks)."""
-        T = self.scene.ego_pose(self.scene.t0 + int(self.time.value * 1e6))
-        with self.follow_lock:
-            delta, self.ego_ref = T @ np.linalg.inv(self.ego_ref), T
+    def follow_ego(self, set_isp: bool = False) -> None:
+        """With "follow ego" on, put every client's view at the ego's front camera at the slider time (its pose
+        and vertical FoV); ``set_isp`` (on switching it on) also selects that camera's ISP affine."""
         if not self.follow.value:
             return
+        name, T_ego_cam, fov = self.scene.front
+        if set_isp and name in self.scene.affine_names:
+            self.affine.value = name
+        c2w = self.scene.ego_pose(self.scene.t0 + int(self.time.value * 1e6)) @ T_ego_cam
         for client in self.server.get_clients().values():
-            c2w = np.eye(4)
-            c2w[:3, :3] = vtf.SO3(client.camera.wxyz).as_matrix()
-            c2w[:3, 3] = client.camera.position
-            c2w = delta @ c2w
             with client.atomic():
+                client.camera.fov = fov
                 client.camera.wxyz = vtf.SO3.from_matrix(c2w[:3, :3]).wxyz
                 client.camera.position = c2w[:3, 3]
 
@@ -424,7 +436,8 @@ class Viewer:
         """Look through context frame ``i``: its pose, vertical FoV, time and ISP camera."""
         cams = self.scene.cameras
         c2w, K, wh = cams["c2w"][i], cams["K"][i], cams["wh"][i]
-        # time first: with "follow ego" on, the time change moves the views, and this one then lands on the frame
+        # time first: with "follow ego" on, the time change moves the views to the front camera, and this one then
+        # lands on the clicked frame (until the next time change)
         self.time.value = min(max((int(cams["timestamps_us"][i]) - self.scene.t0) / 1e6, 0.0), self.time.max)
         if str(cams["camera"][i]) in self.scene.affine_names:
             self.affine.value = str(cams["camera"][i])
