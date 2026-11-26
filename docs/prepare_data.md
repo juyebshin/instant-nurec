@@ -55,6 +55,48 @@ ln -sfn /home1/irteam/data/waymo_ns  data/waymo_ns     # made in step 2 from the
 | Waymo Open Dataset (perception) | <https://waymo.com/open/download> (registration) | the `training` / `validation` tfrecords (here `/home1/irteam/data/waymo/{training,validation}`), converted to `data/waymo_ns` in step 2 |
 | OpenScene (NAVSIM) | <https://github.com/OpenDriveLab/OpenScene> | `navsim_logs/trainval/*.pkl` and the trainval camera sensor blobs; `sensor_blobs/all_sensor_blobs/` is a directory of per-log symlinks into the downloaded parts |
 
+### Optional: OpenScene at 10 Hz (nuPlan sweeps)
+
+OpenScene keeps nuPlan's frames at 2 Hz; nuPlan recorded its 8 cameras at 10 Hz. The in-between frames are
+meant as **supervision only** (context stays on the labelled 2 Hz frames), giving the render losses views the
+model did not see as input. They come from nuPlan v1.1 itself, which needs a nuplan.org account and acceptance
+of its terms:
+
+```bash
+# on the download machine; standard-library Python, copy the two files over
+python3 scripts/data/fetch_openscene_sweeps.py --logs scripts/data/openscene_lvpgh_logs.txt --out ~/data/openscene --dry-run
+python3 scripts/data/fetch_openscene_sweeps.py --logs scripts/data/openscene_lvpgh_logs.txt --out ~/data/openscene
+```
+
+It writes `~/data/openscene/nuplan_db/<log>.db` (image table with per-camera timestamps, 100 Hz ego poses,
+calibration) and `~/data/openscene/sensor_blobs/sweeps/<log>/<CAM>/<token>.jpg` (every frame not already in
+`sensor_blobs/trainval/`; OpenScene keeps nuPlan's file names). It fetches only the listed logs' bytes: the
+`.db` archives are zips (read by member), and the camera "zips" are tar files whose images are grouped by log,
+which the script locates by probing and then streams. Reruns resume. At the end it checks every log against its
+database's image table (`nuplan_fetch/summary.json`). Checked on one log (2021.05.12.22.00.38_veh-35_01008_01518,
+in `train_camera_0`): 5100 images per camera at 100 ms, the OpenScene 2 Hz frames among them under the same
+names. About 9 GB of images for that log; the 240 logs are roughly 0.9 TB (estimate from the 2 Hz sizes).
+
+Downloaded on 2026-11-26: all 240 logs complete (5.42M database images, none missing; 25 GB of databases).
+
+The index with the sweeps is a separate tree, `data/index/geo/openscene_sweeps/{train,val}` (same runs as
+`geo/openscene`), written by Step 4's OpenScene script with `SWEEPS=1`:
+
+```bash
+SWEEPS=1 bash scripts/index/export_openscene.sh     # export_index.py --openscene-sweeps
+```
+
+Each run gets every database image between its first and last keyframe as a frame with its own camera timestamp,
+`depth=None` and `seg=None`, and the database's ~100 Hz ego poses in the rig. The 2 Hz part (cameras, keyframes,
+their poses, boxes) is identical to the `geo/openscene` pickle; checked field by field on one run. The database's
+lidar-keyed ego pose equals NAVSIM's `ego2global` (0 m), and warping keyframes into adjacent sweeps with MoGe
+depth has its lowest photometric error at the sweep's own timestamp (±20 / 50 / 100 ms offsets are worse), so the
+sweep timestamps and poses line up. `configs/training/pmt_openscene_motion_sweeps.yaml` trains on it.
+
+Known gaps: the keyframes keep NAVSIM's lidar timestamp, while the cameras fire −21 to +23 ms from it (median
+ego motion in that time 5 cm, up to 25 cm); unchanged here so the context is as before. Sweeps have no masks,
+so their ego-vehicle pixels are not masked out of the render loss (≤ 3% of CAM_L0 / CAM_R0).
+
 ## Step 2: MoGe-3 depth labels (required)
 
 The depth labels are LiDAR-aligned MoGe-3 predictions: log-encoded uint16 PNGs of camera z-depth

@@ -241,6 +241,65 @@ def index_openscene(run):
     return cameras, frames, rig, tracks
 
 
+def _quat_wxyz_to_matrix(q):
+    w, x, y, z = q / np.linalg.norm(q)
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                     [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                     [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+
+
+def add_openscene_sweeps(log, frames, rig):
+    """Add nuPlan's 10 Hz camera frames between a run's 2 Hz OpenScene keyframes, and nuPlan's ~100 Hz ego poses.
+
+    Reads ``data/openscene/nuplan_db/<log>.db`` and ``sensor_blobs/sweeps/<log>/<CAM>/`` (written by
+    ``scripts/data/fetch_openscene_sweeps.py``). A sweep frame has its own camera timestamp (the keyframes keep the
+    lidar timestamp NAVSIM gives them) and no depth or mask, so it is never a context frame
+    (``context_requires_depth``) and only enters the supervision. Only ``[first, last]`` keyframe time of the run
+    is filled, so the keyframes, their poses (the DB's lidar-keyed ego pose equals NAVSIM's ``ego2global``,
+    2026-11-26) and the boxes are unchanged.
+    """
+    import sqlite3
+
+    t = rig["timestamps_us"]
+    t0, t1 = int(t[0]), int(t[-1])
+    con = sqlite3.connect(f"file:{OPENSCENE}/nuplan_db/{log}.db?mode=ro", uri=True)
+    n_added = {}
+    for cam, fr in frames.items():
+        keys = {osp.basename(f["img"]) for f in fr}
+        rows = con.execute(
+            "SELECT i.filename_jpg, i.timestamp FROM image i JOIN camera c ON i.camera_token = c.token "
+            "WHERE c.channel = ? AND i.timestamp BETWEEN ? AND ?", (cam, t0, t1)).fetchall()
+        added = []
+        for name, ts in rows:
+            base = osp.basename(name)
+            if base in keys:
+                continue
+            path = f"{OPENSCENE}/sensor_blobs/sweeps/{log}/{cam}/{base}"
+            if not osp.exists(path):  # an OpenScene keyframe outside this run's list (fetch skipped it)
+                path = f"{OPENSCENE}/sensor_blobs/all_sensor_blobs/{log}/{cam}/{base}"
+            assert osp.exists(path), (log, cam, base)
+            added.append(dict(t_us=int(ts), img=path, seg=None, depth=None))
+        frames[cam] = sorted(fr + added, key=lambda f: f["t_us"])
+        n_added[cam] = len(added)
+    poses = con.execute("SELECT timestamp, x, y, z, qw, qx, qy, qz FROM ego_pose WHERE timestamp > ? AND "
+                        "timestamp < ? ORDER BY timestamp", (t0, t1)).fetchall()
+    con.close()
+    have = set(t.tolist())
+    new_t, new_T = [], []
+    for ts, x, y, z, *q in poses:
+        if ts in have:
+            continue
+        T = np.eye(4)
+        T[:3, :3], T[:3, 3] = _quat_wxyz_to_matrix(np.array(q, np.float64)), (x, y, z)
+        new_t.append(ts)
+        new_T.append(T)
+    ts_all = np.concatenate([t, np.array(new_t, np.int64)])
+    order = np.argsort(ts_all, kind="stable")
+    rig["timestamps_us"] = ts_all[order]
+    rig["T_ego_world"] = np.concatenate([rig["T_ego_world"], np.stack(new_T)])[order]
+    return n_added
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", choices=("av2", "nusc", "waymo", "openscene"), required=True)
@@ -248,6 +307,8 @@ def main():
     ap.add_argument("--scenes", nargs="+", required=True,
                     help="AV2 log ids / nuScenes scene names / Waymo segment names / OpenScene runs <log>:<a>-<b>")
     ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--openscene-sweeps", action="store_true",
+                    help="OpenScene: also add nuPlan's 10 Hz in-between frames and ego poses (add_openscene_sweeps)")
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
     nusc = None
@@ -259,6 +320,8 @@ def main():
         extra = {}
         if args.dataset == "openscene":
             cameras, frames, rig, extra["tracks"] = index_openscene(scene)
+            if args.openscene_sweeps:
+                add_openscene_sweeps(scene.rsplit(":", 1)[0], frames, rig)
             scene = scene.replace(":", "_")  # file / sequence name <log>_<first>-<last>
         elif args.dataset == "waymo":
             cameras, frames, rig = index_waymo(scene)
