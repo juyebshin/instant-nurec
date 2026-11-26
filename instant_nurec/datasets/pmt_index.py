@@ -461,6 +461,24 @@ class PMTIndexDataset(BaseInstantNuRecIndexableDataset[InstantNuRecDataBatch]):
                    **({"world_origin": index["_world_origin"]} if "_world_origin" in index else {})}],
         )
 
+    def load_source_image(self, index_path: str, camera_id: str, t_us: int, source_resolution: bool = False
+                          ) -> np.ndarray:
+        """The ``camera_id`` image at ``t_us`` as uint8 RGB on the video's camera: undistorted onto the index's
+        pinhole camera (``source_resolution``) and then, by default, cropped and resized as the model's input."""
+        index = next(x for x in self.indexes if x["_path"] == str(index_path))
+        frame = next(f for f in index["frames"][camera_id] if int(f["t_us"]) == int(t_us))
+        meta = index["cameras"][camera_id]
+        image = cv2.imread(frame["img"])
+        if "distortion" in meta:
+            image = undistort_image(image, meta["distortion"], np.asarray(meta["K"], np.float64), tuple(meta["wh"]))
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        if source_resolution:
+            return image
+        subsampler = CameraSubsampler(frame_width=self.config.camera_subsampler.frame_width,
+                                      frame_height=self.config.camera_subsampler.frame_height)
+        image = subsampler.apply_frame_data(image.astype(np.float32) / 255.0)  # as _load_labels
+        return (np.clip(image, 0.0, 1.0) * 255.0).round().astype(np.uint8)
+
     def load_full_camera_rig(self, index_path: str, reference_rig: RigTrajectories, camera_id: str,
                              source_resolution: bool = False) -> RigTrajectories:
         """Every frame of ``camera_id`` in the log as a lightweight rig (no images), in ``reference_rig``'s frame;

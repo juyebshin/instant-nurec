@@ -36,7 +36,7 @@ from instant_nurec.predict.export_cameras import export_cameras
 from instant_nurec.predict.export_dynamic import export_dynamic
 from instant_nurec.predict.primitive_merge import KelvinPrimitiveMerge
 from instant_nurec.predict.render_preview import render_reference_preview
-from instant_nurec.predict.render_video import render_reference_video
+from instant_nurec.predict.render_video import encode_video, render_reference_video
 from instant_nurec.primitives.base import BaseInstantNuRecPrimitive
 from instant_nurec.primitives.kelvin_primitive import KelvinInstantNuRecPrimitive
 from instant_nurec.utils.batch import DataAndRenderingBatch, InstantNuRecDataBatch
@@ -209,6 +209,17 @@ class GaussiansInstantNuRecSystem(nn.Module):
                 if getattr(self.predict_config, "save_video_frames", False):
                     print(f"Wrote {video_stats.frame_count:,} video frames as PNG: {(path.parent / 'images').resolve()}",
                           flush=True)
+                if getattr(self.predict_config, "source_video", False):
+                    camera_id = predict_dataset.config.camera_ids[0]
+                    stamps = full_camera_rig.rig_trajectories[0].cameras_frame_timestamps_us[camera_id][:, 1]
+                    source_resolution = getattr(self.predict_config, "video_source_resolution", False)
+                    source_path = path.with_suffix(".source.mp4")
+                    n = encode_video(
+                        (predict_dataset.load_source_image(meta["index_path"], camera_id, int(t), source_resolution)
+                         for t in stamps),
+                        width=video_stats.width, height=video_stats.height, fps=video_stats.fps, path=source_path,
+                    )
+                    print(f"Wrote the source images as a video ({n:,} frames): {source_path.resolve()}", flush=True)
 
         for chunk_idx in range(n_chunks):
             meta = out_batch.meta[chunk_idx]

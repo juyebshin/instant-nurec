@@ -9,9 +9,11 @@ import shutil
 import subprocess
 import tempfile
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from PIL import Image
@@ -159,6 +161,49 @@ def _stop_process(process: subprocess.Popen) -> None:
         process.wait()
     except OSError:
         pass
+
+
+def encode_video(frames: Iterable[np.ndarray], *, width: int, height: int, fps: float, path: Path) -> int:
+    """H.264-encode uint8 RGB frames of ``height`` x ``width`` to ``path`` (written in place only on success),
+    with the settings of the calibrated video; returns the frame count."""
+
+    ffmpeg = require_ffmpeg()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial_path = _reserve_partial_path(path)
+    process: subprocess.Popen | None = None
+    completed = False
+    count = 0
+    with tempfile.TemporaryFile(mode="w+b") as stderr_log:
+        try:
+            process = subprocess.Popen(
+                _ffmpeg_command(ffmpeg, width=width, height=height, fps=fps, output_path=partial_path),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_log,
+            )
+            if process.stdin is None:  # pragma: no cover - subprocess contract
+                raise RuntimeError("Failed to open ffmpeg input pipe")
+            try:
+                for frame in frames:
+                    if frame.shape != (height, width, 3) or frame.dtype != np.uint8:
+                        raise ValueError(f"Frame has shape {frame.shape} / {frame.dtype}, expected "
+                                         f"{(height, width, 3)} / uint8")
+                    process.stdin.write(np.ascontiguousarray(frame).tobytes())
+                    count += 1
+                process.stdin.close()
+            except BrokenPipeError as exc:
+                raise _ffmpeg_error(process.wait(), stderr_log) from exc
+            returncode = process.wait()
+            if returncode != 0:
+                raise _ffmpeg_error(returncode, stderr_log)
+            partial_path.replace(path)
+            completed = True
+        finally:
+            if process is not None:
+                _stop_process(process)
+            if not completed:
+                partial_path.unlink(missing_ok=True)
+    return count
 
 
 def _single_camera_sequence(

@@ -102,3 +102,9 @@ class PredictConfig(BaseConfigSchema):
         description="With render_video on PMT index logs: render on the index's own pinhole camera (K / wh, e.g. "
         "OpenScene's undistorted 1920x1080) instead of the model's cropped and resized input camera.",
     )
+    source_video: bool = Field(
+        default=False,
+        description="With render_video on PMT index logs: also write the camera's source images as "
+        "<seq>.source.mp4 beside the render, same frames, fps and camera (undistorted; cropped and resized as "
+        "the model's input unless video_source_resolution).",
+    )
