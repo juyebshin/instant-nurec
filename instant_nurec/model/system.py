@@ -187,6 +187,8 @@ class GaussiansInstantNuRecSystem(nn.Module):
                     path.with_suffix(".render.mp4"),
                     frames_dir=path.parent / "images" if getattr(self.predict_config, "save_video_frames", False)
                     else None,
+                    opacity_dir=path.parent / "opacity" if getattr(self.predict_config, "save_video_opacity", False)
+                    else None,
                 )
             if render_stats is not None:
                 print(
@@ -209,6 +211,9 @@ class GaussiansInstantNuRecSystem(nn.Module):
                 if getattr(self.predict_config, "save_video_frames", False):
                     print(f"Wrote {video_stats.frame_count:,} video frames as PNG: {(path.parent / 'images').resolve()}",
                           flush=True)
+                if getattr(self.predict_config, "save_video_opacity", False):
+                    print(f"Wrote {video_stats.frame_count:,} opacity frames as PNG: "
+                          f"{(path.parent / 'opacity').resolve()}", flush=True)
                 if getattr(self.predict_config, "source_video", False):
                     camera_id = predict_dataset.config.camera_ids[0]
                     stamps = full_camera_rig.rig_trajectories[0].cameras_frame_timestamps_us[camera_id][:, 1]

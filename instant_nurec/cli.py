@@ -234,6 +234,13 @@ def make_parser() -> argparse.ArgumentParser:
         "named by its source timestamp (<t_us>.png).",
     )
     parser.add_argument(
+        "--save-video-opacity",
+        action="store_true",
+        help="With --render-video, also write every video frame's rendered Gaussian opacity (before the sky "
+        "composite) as an 8-bit grayscale PNG (255 = opaque) to opacity/ next to the MP4, named as "
+        "--save-video-frames.",
+    )
+    parser.add_argument(
         "--video-source-resolution",
         action="store_true",
         help="With --render-video and --index-path, render the video (and --save-video-frames) on the index's "
@@ -272,6 +279,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--source-video requires --render-video and --index-path")
     if args.save_video_frames and not args.render_video:
         parser.error("--save-video-frames requires --render-video")
+    if args.save_video_opacity and not args.render_video:
+        parser.error("--save-video-opacity requires --render-video")
     if args.render_video and not args.merge:
         parser.error("--render-video requires --merge so one complete scene is rendered")
     if args.max_chunks <= 0:
@@ -386,6 +395,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             render_preview=args.render_preview,
             render_video=args.render_video,
             save_video_frames=args.save_video_frames,
+            save_video_opacity=args.save_video_opacity,
             checkpoint_path=str(args.checkpoint) if args.checkpoint is not None else None,
         ),
     )
@@ -469,6 +479,7 @@ def _main_index(args: argparse.Namespace, parser: argparse.ArgumentParser, profi
             render_preview=args.render_preview,
             render_video=args.render_video,
             save_video_frames=args.save_video_frames,
+            save_video_opacity=args.save_video_opacity,
             video_source_resolution=args.video_source_resolution,
             source_video=args.source_video,
             checkpoint_path=str(args.checkpoint) if args.checkpoint is not None else None,

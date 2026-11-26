@@ -251,9 +251,11 @@ def render_reference_video(
     full_camera_rig: RigTrajectories,
     path: Path,
     frames_dir: Path | None = None,
+    opacity_dir: Path | None = None,
 ) -> RenderVideoStats:
     """Render every source exposure while keeping only one frame's rays live. ``frames_dir``: also write each
-    frame there as ``<end-of-exposure timestamp us>.png`` (the pixels the MP4 encodes, before its lossy compression)."""
+    frame there as ``<end-of-exposure timestamp us>.png`` (the pixels the MP4 encodes, before its lossy compression).
+    ``opacity_dir``: also write each frame's Gaussian opacity there, same name, 8-bit grayscale (255 = opaque)."""
 
     ffmpeg = require_ffmpeg()
     sensor_id, calibration, timestamps = _single_camera_sequence(full_camera_rig)
@@ -270,8 +272,9 @@ def render_reference_video(
         raise ValueError(f"H.264 yuv420p output requires even dimensions, got {width}x{height}")
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    if frames_dir is not None:
-        frames_dir.mkdir(parents=True, exist_ok=True)
+    for frame_dir in (frames_dir, opacity_dir):
+        if frame_dir is not None:
+            frame_dir.mkdir(parents=True, exist_ok=True)
     partial_path = _reserve_partial_path(path)
     process: subprocess.Popen | None = None
     completed = False
@@ -323,6 +326,11 @@ def render_reference_video(
                     process.stdin.write(pixels.tobytes())
                     if frames_dir is not None:
                         Image.fromarray(pixels).save(frames_dir / f"{int(timestamps[frame_idx, 1])}.png")
+                    if opacity_dir is not None:
+                        alpha = opacity.reshape(height, width).mul(255.0).round_().clamp_(0.0, 255.0)
+                        Image.fromarray(alpha.to(dtype=torch.uint8, device="cpu").numpy(), mode="L").save(
+                            opacity_dir / f"{int(timestamps[frame_idx, 1])}.png"
+                        )
                     background_sum += float((1.0 - opacity).mean().item())
                     sky_contribution_sum += float(((1.0 - opacity[..., None]) * sky).mean().item())
 

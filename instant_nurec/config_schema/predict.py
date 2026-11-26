@@ -97,6 +97,11 @@ class PredictConfig(BaseConfigSchema):
         description="With render_video, also write every video frame as a PNG to images/ next to the MP4, "
         "named <source timestamp us>.png.",
     )
+    save_video_opacity: bool = Field(
+        default=False,
+        description="With render_video, also write every video frame's rendered Gaussian opacity (before the sky "
+        "composite) as an 8-bit grayscale PNG to opacity/ next to the MP4 (255 = opaque), named as images/.",
+    )
     video_source_resolution: bool = Field(
         default=False,
         description="With render_video on PMT index logs: render on the index's own pinhole camera (K / wh, e.g. "
