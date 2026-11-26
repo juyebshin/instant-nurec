@@ -380,6 +380,7 @@ def _main_index(args: argparse.Namespace, parser: argparse.ArgumentParser, profi
     with open(index_paths[0], "rb") as f:
         first = pickle.load(f)
     camera_ids = list(args.camera_ids or first["cameras"])
+    tracks = "tracks" in first and args.motion_source != "learned"  # reconstruct() ignores tracks for learned motion
     n_frames = args.n_frames or profile.n_frames_per_sample
     logging.getLogger(__name__).info(
         "%d index log(s), cameras %s, %d frames per camera per chunk, gap <= %d us",
@@ -403,8 +404,8 @@ def _main_index(args: argparse.Namespace, parser: argparse.ArgumentParser, profi
                 context_requires_depth=False,  # images only: every frame is a context candidate
                 depth=False,
                 semantic_segmentation=False,
-                cuboid_tracks=NCoreInstantNuRecCuboidTracksParamsConfig() if "tracks" in first else None,
-                track_dynamic_any_chunk="tracks" in first,  # a box that moves in any chunk is dynamic in all
+                cuboid_tracks=NCoreInstantNuRecCuboidTracksParamsConfig() if tracks else None,
+                track_dynamic_any_chunk=tracks,  # a box that moves in any chunk is dynamic in all
                 frame_batch_sampler=AdaptiveSequentialFrameBatchSamplerConfig(
                     n_frames_per_sample=n_frames,
                     n_samples_per_sequence=args.max_chunks,
