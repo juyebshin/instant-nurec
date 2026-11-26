@@ -234,6 +234,13 @@ def make_parser() -> argparse.ArgumentParser:
         "named by its source timestamp (<t_us>.png).",
     )
     parser.add_argument(
+        "--video-source-resolution",
+        action="store_true",
+        help="With --render-video and --index-path, render the video (and --save-video-frames) on the index's "
+        "own pinhole camera, e.g. OpenScene's 1920x1080 (the raw image undistorted, as the model's input before "
+        "its crop and resize), instead of the model's input size.",
+    )
+    parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         default="INFO",
@@ -252,6 +259,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.motion_source == "learned" and not args.include_dynamic:
         parser.error("--motion-source learned requires --include-dynamic")
 
+    if args.video_source_resolution and not (args.render_video and args.index_path is not None):
+        parser.error("--video-source-resolution requires --render-video and --index-path")
     if args.save_video_frames and not args.render_video:
         parser.error("--save-video-frames requires --render-video")
     if args.render_video and not args.merge:
@@ -451,6 +460,7 @@ def _main_index(args: argparse.Namespace, parser: argparse.ArgumentParser, profi
             render_preview=args.render_preview,
             render_video=args.render_video,
             save_video_frames=args.save_video_frames,
+            video_source_resolution=args.video_source_resolution,
             checkpoint_path=str(args.checkpoint) if args.checkpoint is not None else None,
         ),
     )

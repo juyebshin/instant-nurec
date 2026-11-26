@@ -97,3 +97,8 @@ class PredictConfig(BaseConfigSchema):
         description="With render_video, also write every video frame as a PNG to images/ next to the MP4, "
         "named <source timestamp us>.png.",
     )
+    video_source_resolution: bool = Field(
+        default=False,
+        description="With render_video on PMT index logs: render on the index's own pinhole camera (K / wh, e.g. "
+        "OpenScene's undistorted 1920x1080) instead of the model's cropped and resized input camera.",
+    )

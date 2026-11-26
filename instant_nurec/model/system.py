@@ -171,7 +171,8 @@ class GaussiansInstantNuRecSystem(nn.Module):
                     raise RuntimeError("Predict dataset is unavailable while exporting the calibrated video")
                 if "index_path" in meta:  # PMT index log
                     full_camera_rig = predict_dataset.load_full_camera_rig(
-                        meta["index_path"], rig, camera_id=predict_dataset.config.camera_ids[0]
+                        meta["index_path"], rig, camera_id=predict_dataset.config.camera_ids[0],
+                        source_resolution=getattr(self.predict_config, "video_source_resolution", False),
                     )
                 else:
                     camera_id = predict_dataset.config.context_camera_ids[0]

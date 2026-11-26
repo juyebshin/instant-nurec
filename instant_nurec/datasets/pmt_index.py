@@ -36,6 +36,7 @@ moving objects go to the learned-motion dynamic layer.
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import hashlib
 import logging
@@ -460,10 +461,13 @@ class PMTIndexDataset(BaseInstantNuRecIndexableDataset[InstantNuRecDataBatch]):
                    **({"world_origin": index["_world_origin"]} if "_world_origin" in index else {})}],
         )
 
-    def load_full_camera_rig(self, index_path: str, reference_rig: RigTrajectories, camera_id: str) -> RigTrajectories:
+    def load_full_camera_rig(self, index_path: str, reference_rig: RigTrajectories, camera_id: str,
+                             source_resolution: bool = False) -> RigTrajectories:
         """Every frame of ``camera_id`` in the log as a lightweight rig (no images), in ``reference_rig``'s frame;
         the PMT counterpart of ``NCoreInstantNuRecDataset.load_full_camera_rig`` (calibrated video). If --max-chunks
-        truncated the log, only the frames inside the reconstructed chunks (the NCore loader raises instead)."""
+        truncated the log, only the frames inside the reconstructed chunks (the NCore loader raises instead).
+        ``source_resolution``: the index's own pinhole camera (``K`` / ``wh``, e.g. OpenScene's 1920x1080, which
+        the images are undistorted onto) instead of the model's cropped and resized input camera."""
         index = next(x for x in self.indexes if x["_path"] == str(index_path))
         times = {cam: np.array([index["frames"][cam][i]["t_us"] for i in self._context_candidates(index, cam)],
                                np.int64) for cam in self.config.camera_ids}
@@ -472,6 +476,10 @@ class PMTIndexDataset(BaseInstantNuRecIndexableDataset[InstantNuRecDataBatch]):
         n, k = self.config.n_frames_per_sample, sampler.chunk_overlap_frames
         required = count_sequential_chunks(interval.end - interval.start, n, sampler.max_frame_gap_timestamp_us, k)
         calibration = reference_rig.camera_calibrations[camera_id]
+        if source_resolution:
+            meta = index["cameras"][camera_id]
+            calibration = dataclasses.replace(calibration, camera_model_parameters=pinhole_parameters(
+                np.asarray(meta["K"], np.float64), tuple(meta["wh"])))
         stamps = np.array([f["t_us"] for f in index["frames"][camera_id]], np.int64)
         if required > self.num_samples_per_sequence:
             # --max-chunks truncated the log: render only the span of the reconstructed chunks. The sampler cuts
