@@ -197,6 +197,8 @@ class Renderer:
     def __init__(self, scene: Scene):
         self.scene = scene
         self.rasterization = require_gsplat()
+        from gsplat.rendering import RendererConfig_MixedBatch
+        self.parallel_batch, self.mixed_batch = _reference_renderer_config(), RendererConfig_MixedBatch()
         self.lock = threading.Lock()  # one render at a time on the GPU
         self.static_keep = torch.ones_like(scene.densities, dtype=torch.bool)
         self.show_movable = True  # the dynamic layer is MOVABLE; the class filter hides it with that class
@@ -254,14 +256,22 @@ class Renderer:
 
         with self.lock:
             means, quats, scales, opacities, colors = self._gaussians(mode == "semantic", t_us, dynamic)
-            out, alpha, _ = self.rasterization(
+            raster = lambda config: self.rasterization(  # noqa: E731
                 means=means, quats=quats, scales=scales, opacities=opacities, colors=colors,
                 viewmats=torch.linalg.inv(c2w_t)[None], Ks=K[None], width=w, height=h,
                 near_plane=near, far_plane=torch.finfo(torch.float32).max, sh_degree=None, render_mode="RGB-d",
                 packed=False, with_ut=True, ut_params=_reference_ut_parameters(),
-                renderer_config=_reference_renderer_config(), with_eval3d=True, global_z_order=False,
+                renderer_config=config, with_eval3d=True, global_z_order=False,
                 rays=rays[None], camera_model="pinhole",
             )
+            try:
+                out, alpha, _ = raster(self.parallel_batch)
+            except RuntimeError as e:
+                # ParallelBatch (the preview renderer's) counts a tile's Gaussian batches in uint16: a view where
+                # one tile meets > ~2 M Gaussians fails. MixedBatch composites serially per tile, with no cap.
+                if "max batches per tile" not in str(e):
+                    raise
+                out, alpha, _ = raster(self.mixed_batch)
         fg, alpha = out[0, ..., :3], alpha[0]
         distance = out[0, ..., 3:4] / alpha.clamp_min(1e-6)
         if mode == "rgb" or mode == "rgb (no sky)":
