@@ -20,6 +20,11 @@ without sky, semantic class (the PLY's ``semantic_class`` from ``--index-path`` 
 masks), depth (ray distance) and opacity. Click a context-camera frustum to look through it: the view, time and
 ISP camera snap to that frame. Moving the camera renders at a reduced size and refines once the view rests.
 Frames go as JPEG only; "frustums behind geometry" adds the depth PNG (~20x the JPEG) to refined frames.
+
+With ``--index <log.pkl>`` (an ``--index-path`` export with ``--include-dynamic``), "edit objects" moves, turns or
+deletes dynamic objects by their index boxes (``tools/track_edit.py``, ``docs/world-model.md``): the boxes are drawn at
+the slider time; click one (or pick it) for a gizmo, drag it or set offset / yaw in the box frame, and its Gaussians
+are re-posed in the render. "save edits" writes ``edits.json`` and the edited scene (``track_edit.py --edits``).
 """
 
 from __future__ import annotations
@@ -298,6 +303,198 @@ class Renderer:
         return rgb, z.cpu().numpy()
 
 
+class TrackEditor:
+    """Move, turn or delete dynamic objects through their index boxes, live (``tools/track_edit.py``, Level 1 of
+    ``docs/world-model.md``): the boxes at the slider time, click one (or pick it) to get a gizmo; dragging it or
+    setting offset / yaw (box frame) re-poses that track's Gaussians in the rendered dynamic layer."""
+
+    COLORS = {"box": (0, 200, 255), "edited": (255, 140, 0), "deleted": (255, 40, 40), "selected": (255, 230, 0)}
+
+    def __init__(self, viewer: Viewer, ply: Path, index_path: Path, padding: tuple[float, float, float]):
+        import pickle
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import track_edit as te
+        from instant_nurec.utils.motion import cuboid_track_time_bounds_us
+
+        s = viewer.scene
+        if s.dynamic is None or s.cameras is None or "world_origin" not in s.cameras:
+            raise SystemExit("--index needs the export's dynamic layer and .cameras.npz (an --index-path run)")
+        with open(index_path, "rb") as f:
+            index = pickle.load(f)
+        if "tracks" not in index:
+            raise SystemExit(f"{index_path} has no 'tracks'")
+        self.te, self.viewer, self.ply = te, viewer, ply
+        d = s.dynamic
+        origin = s.cameras["world_origin"].astype(np.float64)
+        self.tracks, self.labels = te.load_tracks(index, origin, d.rotations.device)
+        self.base = (d.keyframe_positions.clone(), d.rotations.clone(), d.max_densities.clone())
+        print(f"Associating {len(d):,} dynamic Gaussians with {self.tracks.n_tracks} boxes ...", flush=True)
+        self.idx = te.associate(d.keyframe_positions[:, 1], d.keyframe_timestamps_us[:, 1], self.tracks, padding)
+        counts = torch.bincount(self.idx[self.idx >= 0], minlength=self.tracks.n_tracks).cpu().numpy()
+        self.active = [int(k) for k in np.argsort(-counts) if counts[k] > 0]
+        self.members = {k: torch.where(self.idx == k)[0] for k in self.active}
+        all_idx = torch.arange(self.tracks.n_tracks, device=self.idx.device, dtype=self.tracks.tracks_packinfo.dtype)
+        self.bounds = cuboid_track_time_bounds_us(self.tracks, all_idx).cpu().numpy()
+        self.dims = self.tracks.cuboids_dims.cpu().numpy()
+        self.names = {f"{self.tracks.tracks_id[k]} {self.labels[k]} ({counts[k]:,})": k for k in self.active}
+        self.edits: dict[int, dict] = {}
+        self.current: int | None = None
+        self.basis: dict[int, tuple] = {}  # per track: repose_basis, built on its first edit
+
+        gui, scene = viewer.server.gui, viewer.server.scene
+        with gui.add_folder("edit objects"):
+            gui.add_markdown(f"{counts.sum() / max(len(self.idx), 1):.1%} of the dynamic Gaussians in "
+                             f"{len(self.active)} boxes. Click a box; offset and yaw are in its frame (x along the "
+                             "length).")
+            self.show = gui.add_checkbox("boxes", initial_value=True)
+            self.pick = gui.add_dropdown("object", ("(none)", *self.names), initial_value="(none)")
+            self.offset = gui.add_vector3("offset [m]", (0.0, 0.0, 0.0), step=0.1, disabled=True)
+            self.yaw = gui.add_number("yaw [deg]", 0.0, step=1.0, disabled=True)
+            self.delete = gui.add_checkbox("delete", initial_value=False, disabled=True)
+            self.reset = gui.add_button("reset object", disabled=True)
+            self.out = gui.add_text("save to", initial_value=str(ply.parent / "edited"))
+            save = gui.add_button("save edits")
+            self.status = gui.add_markdown("")
+        self.boxes = {k: self._add_box(k) for k in self.active}
+        self.gizmo = scene.add_transform_controls("/objects/gizmo", scale=2.5, disable_sliders=True, visible=False)
+        self.gizmo.on_update(self._on_gizmo)
+        self.show.on_update(lambda _: self.update())
+        self.pick.on_update(lambda _: self.select(self.names.get(self.pick.value)))
+        for handle in (self.offset, self.yaw, self.delete):
+            handle.on_update(self._on_field)
+        self.reset.on_click(lambda _: self._set_edit(self.current, {}))
+        save.on_click(lambda _: self.save())
+        viewer.time.on_update(lambda _: self.update())
+        self.update()
+
+    def _add_box(self, k: int):
+        state = ("selected" if k == self.current else "deleted" if self.edits.get(k, {}).get("delete")
+                 else "edited" if k in self.edits else "box")
+        handle = self.viewer.server.scene.add_box(
+            f"/objects/{self.tracks.tracks_id[k]}", color=self.COLORS[state], dimensions=tuple(self.dims[k]),
+            wireframe=True, visible=False)
+        handle.on_click(lambda _, k=k: setattr(self.pick, "value", self._name(k)))
+        return handle
+
+    def _name(self, k: int) -> str:
+        return next(name for name, j in self.names.items() if j == k)
+
+    def _t_us(self) -> int:
+        return self.viewer.scene.t0 + int(self.viewer.time.value * 1e6)
+
+    def _poses(self, ks: list[int], edited: bool = True) -> np.ndarray:
+        """The boxes of tracks ``ks`` -> world at the slider time (n, 4, 4), with their edits unless ``edited`` is
+        off; one batched interpolation."""
+        dev = self.idx.device
+        idx = torch.tensor(ks, dtype=self.tracks.tracks_packinfo.dtype, device=dev)
+        T = self.te.track_poses(self.tracks, torch.full((len(ks),), self._t_us(), device=dev), idx)
+        data = T.data.cpu().numpy()
+        out = np.tile(np.eye(4), (len(ks), 1, 1))
+        out[:, :3, :3] = vtf.SO3(data[:, [6, 3, 4, 5]]).as_matrix()
+        out[:, :3, 3] = data[:, :3]
+        for i, k in enumerate(ks):
+            if edited and k in self.edits and not self.edits[k].get("delete"):
+                E = np.eye(4)
+                E[:3, :3] = vtf.SO3.from_z_radians(math.radians(self.edits[k]["yaw_deg"])).as_matrix()
+                E[:3, 3] = self.edits[k]["offset_m"]
+                out[i] = out[i] @ E
+        return out
+
+    def _pose(self, k: int, edited: bool = True) -> np.ndarray:
+        return self._poses([k], edited)[0]
+
+    def update(self) -> None:
+        """Boxes of the tracks annotated around the slider time at their (edited) poses; the gizmo on the selected."""
+        t = self._t_us()
+        shown = [k for k in self.boxes if self.show.value and self.bounds[k, 0] <= t <= self.bounds[k, 1]]
+        poses = dict(zip(shown, self._poses(shown))) if shown else {}
+        with self.viewer.server.atomic():
+            for k, handle in self.boxes.items():
+                if k in poses:
+                    handle.wxyz, handle.position = vtf.SO3.from_matrix(poses[k][:3, :3]).wxyz, poses[k][:3, 3]
+                handle.visible = k in poses
+            if self.current is not None:
+                T = self._pose(self.current)
+                self.gizmo.wxyz, self.gizmo.position = vtf.SO3.from_matrix(T[:3, :3]).wxyz, T[:3, 3]
+            self.gizmo.visible = self.current is not None
+
+    def select(self, k: int | None) -> None:
+        previous, self.current = self.current, k
+        for j in {previous, k} - {None}:
+            self.boxes[j].remove()
+            self.boxes[j] = self._add_box(j)
+        edit = self.edits.get(k, {}) if k is not None else {}
+        self.offset.value = tuple(edit.get("offset_m", (0.0, 0.0, 0.0)))  # client=None: no re-apply
+        self.yaw.value = float(edit.get("yaw_deg", 0.0))
+        self.delete.value = bool(edit.get("delete", False))
+        for handle in (self.offset, self.yaw, self.delete, self.reset):
+            handle.disabled = k is None
+        if k is not None:
+            start, end = (self.bounds[k] - self.viewer.scene.t0) / 1e6
+            self.status.content = f"{len(self.members[k]):,} Gaussians, annotated {start:.1f} – {end:.1f} s"
+        self.update()
+
+    def _on_field(self, event) -> None:
+        if event.client is None or self.current is None:  # set by the server (select / gizmo), already applied
+            return
+        edit = {"delete": True} if self.delete.value else {"offset_m": [float(v) for v in self.offset.value],
+                                                             "yaw_deg": float(self.yaw.value)}
+        self._set_edit(self.current, edit)
+
+    def _on_gizmo(self, event) -> None:
+        if self.current is None or self.delete.value:
+            return
+        T_box = self._pose(self.current, edited=False)
+        T_gizmo = np.eye(4)
+        T_gizmo[:3, :3], T_gizmo[:3, 3] = vtf.SO3(np.asarray(event.target.wxyz)).as_matrix(), event.target.position
+        E = np.linalg.inv(T_box) @ T_gizmo  # the edit in the box frame; roll and pitch are dropped
+        edit = {"offset_m": [round(float(v), 3) for v in E[:3, 3]],
+                "yaw_deg": round(math.degrees(math.atan2(E[1, 0], E[0, 0])), 2)}
+        self.offset.value, self.yaw.value = tuple(edit["offset_m"]), edit["yaw_deg"]
+        self._set_edit(self.current, edit, move_gizmo=event.phase == "end")
+
+    def _set_edit(self, k: int | None, edit: dict, move_gizmo: bool = True) -> None:
+        """Re-pose (or hide) track ``k``'s Gaussians in the rendered dynamic layer from the unedited ones."""
+        if k is None:
+            return
+        identity = not edit.get("delete") and not any(edit.get("offset_m", ())) and not edit.get("yaw_deg")
+        if identity:
+            self.edits.pop(k, None)
+        else:
+            self.edits[k] = edit
+        if not edit and self.current == k:  # reset
+            self.select(k)
+        sel, d = self.members[k], self.viewer.scene.dynamic
+        positions, rotations, densities = self.base
+        with self.viewer.renderer.lock:
+            d.max_densities[sel] = 0.0 if edit.get("delete") else densities[sel]
+            if identity or edit.get("delete"):
+                d.keyframe_positions[sel], d.rotations[sel] = positions[sel], rotations[sel]
+            else:
+                if k not in self.basis:
+                    self.basis[k] = self.te.repose_basis(positions[sel], d.keyframe_timestamps_us[sel], self.tracks, k)
+                d.keyframe_positions[sel], d.rotations[sel] = self.te.repose_apply(self.basis[k], rotations[sel], edit)
+            self.viewer.renderer._cache_key = None
+        self.viewer.mark_all()
+        if move_gizmo:
+            self.update()
+        else:  # mid-drag: move the box only, the gizmo is the user's
+            T = self._pose(k)
+            self.boxes[k].wxyz, self.boxes[k].position = vtf.SO3.from_matrix(T[:3, :3]).wxyz, T[:3, 3]
+
+    def save(self) -> None:
+        """The edits as ``edits.json`` and the edited scene (``track_edit.py --edits``) in the "save to" folder."""
+        import json
+
+        out = Path(self.out.value).expanduser()
+        dynamic = dict(np.load(self.ply.with_suffix(".dynamic.npz")))
+        path = self.te.write_edited(self.ply, self.te.edit_dynamic(dynamic, self.tracks, self.idx, self.edits), out)
+        edits = {self.tracks.tracks_id[k]: v for k, v in self.edits.items()}
+        (out / "edits.json").write_text(json.dumps(edits, indent=1))
+        self.status.content = f"saved {len(edits)} edit(s): `{path}`"
+
+
 def _turbo(x: torch.Tensor) -> torch.Tensor:
     """Google turbo colormap (polynomial fit), x in [0, 1] -> RGB."""
     x = x.clamp(0, 1)[..., None]
@@ -532,6 +729,10 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--host", default="127.0.0.1", help="127.0.0.1 (shared machine): reach it through ssh -L; "
                     "0.0.0.0 serves every network interface")
+    ap.add_argument("--index", type=Path, help="the log's index pickle (with 'tracks'): adds 'edit objects', moving, "
+                    "turning or deleting dynamic objects by their boxes (tools/track_edit.py)")
+    ap.add_argument("--padding", type=float, nargs=3, default=(1.0, 1.0, 1.0), metavar=("X", "Y", "Z"),
+                    help="with --index: box padding of the first association pass (run_inference.py --cuboid-padding)")
     args = ap.parse_args()
     device = torch.device("cuda")
     t = time.time()
@@ -541,6 +742,8 @@ def main() -> None:
     print(f"Loaded {len(scene.positions):,} static + {n_dynamic:,} dynamic Gaussians, {n_cameras} context cameras "
           f"in {time.time() - t:.1f} s", flush=True)
     viewer = Viewer(scene, Renderer(scene), args.port, args.host)
+    if args.index is not None:
+        TrackEditor(viewer, args.ply, args.index, tuple(args.padding))
     viewer.run()
 
 
