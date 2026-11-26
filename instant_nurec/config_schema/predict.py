@@ -92,3 +92,8 @@ class PredictConfig(BaseConfigSchema):
             "one complete merged sequence, the render extra, and ffmpeg."
         ),
     )
+    save_video_frames: bool = Field(
+        default=False,
+        description="With render_video, also write every video frame as a PNG to images/ next to the MP4, "
+        "named <source timestamp us>.png.",
+    )

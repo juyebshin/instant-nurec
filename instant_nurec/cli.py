@@ -228,6 +228,12 @@ def make_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--save-video-frames",
+        action="store_true",
+        help="With --render-video, also write every video frame as a lossless PNG to images/ next to the MP4, "
+        "named by its source timestamp (<t_us>.png).",
+    )
+    parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         default="INFO",
@@ -246,6 +252,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.motion_source == "learned" and not args.include_dynamic:
         parser.error("--motion-source learned requires --include-dynamic")
 
+    if args.save_video_frames and not args.render_video:
+        parser.error("--save-video-frames requires --render-video")
     if args.render_video and not args.merge:
         parser.error("--render-video requires --merge so one complete scene is rendered")
     if args.max_chunks <= 0:
@@ -359,6 +367,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             render_preview=args.render_preview,
             render_video=args.render_video,
+            save_video_frames=args.save_video_frames,
             checkpoint_path=str(args.checkpoint) if args.checkpoint is not None else None,
         ),
     )
@@ -441,6 +450,7 @@ def _main_index(args: argparse.Namespace, parser: argparse.ArgumentParser, profi
             ),
             render_preview=args.render_preview,
             render_video=args.render_video,
+            save_video_frames=args.save_video_frames,
             checkpoint_path=str(args.checkpoint) if args.checkpoint is not None else None,
         ),
     )

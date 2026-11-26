@@ -14,6 +14,7 @@ from pathlib import Path
 
 import torch
 
+from PIL import Image
 from tqdm import tqdm
 
 from instant_nurec.predict.render_preview import render_composited_frame
@@ -204,8 +205,10 @@ def render_reference_video(
     primitive: KelvinInstantNuRecPrimitive,
     full_camera_rig: RigTrajectories,
     path: Path,
+    frames_dir: Path | None = None,
 ) -> RenderVideoStats:
-    """Render every source exposure while keeping only one frame's rays live."""
+    """Render every source exposure while keeping only one frame's rays live. ``frames_dir``: also write each
+    frame there as ``<end-of-exposure timestamp us>.png`` (the pixels the MP4 encodes, before its lossy compression)."""
 
     ffmpeg = require_ffmpeg()
     sensor_id, calibration, timestamps = _single_camera_sequence(full_camera_rig)
@@ -222,6 +225,8 @@ def render_reference_video(
         raise ValueError(f"H.264 yuv420p output requires even dimensions, got {width}x{height}")
 
     path.parent.mkdir(parents=True, exist_ok=True)
+    if frames_dir is not None:
+        frames_dir.mkdir(parents=True, exist_ok=True)
     partial_path = _reserve_partial_path(path)
     process: subprocess.Popen | None = None
     completed = False
@@ -245,12 +250,12 @@ def render_reference_video(
                 raise RuntimeError("Failed to open ffmpeg input pipe")
 
             try:
-                for unique_frame_idx in tqdm(
+                for frame_idx, unique_frame_idx in enumerate(tqdm(
                     frame_range,
                     total=frame_count,
                     desc="Rendering calibrated video",
                     unit="frame",
-                ):
+                )):
                     context = _frame_context(
                         geometry,
                         unique_sensor_idx=calibration.unique_sensor_idx,
@@ -271,6 +276,8 @@ def render_reference_video(
                         .numpy()
                     )
                     process.stdin.write(pixels.tobytes())
+                    if frames_dir is not None:
+                        Image.fromarray(pixels).save(frames_dir / f"{int(timestamps[frame_idx, 1])}.png")
                     background_sum += float((1.0 - opacity).mean().item())
                     sky_contribution_sum += float(((1.0 - opacity[..., None]) * sky).mean().item())
 

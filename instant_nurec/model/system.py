@@ -184,6 +184,8 @@ class GaussiansInstantNuRecSystem(nn.Module):
                     cast(KelvinInstantNuRecPrimitive, primitive),
                     full_camera_rig,
                     path.with_suffix(".render.mp4"),
+                    frames_dir=path.parent / "images" if getattr(self.predict_config, "save_video_frames", False)
+                    else None,
                 )
             if render_stats is not None:
                 print(
@@ -203,6 +205,9 @@ class GaussiansInstantNuRecSystem(nn.Module):
                     f"{video_stats.path.resolve()}",
                     flush=True,
                 )
+                if getattr(self.predict_config, "save_video_frames", False):
+                    print(f"Wrote {video_stats.frame_count:,} video frames as PNG: {(path.parent / 'images').resolve()}",
+                          flush=True)
 
         for chunk_idx in range(n_chunks):
             meta = out_batch.meta[chunk_idx]
